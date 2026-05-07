@@ -1,8 +1,20 @@
-"""NVIDIA NeMo Canary-1B STT service."""
+"""NVIDIA NeMo Canary STT service.
+
+Originally targeted nvidia/canary-1b-flash but that requires the 'canary2'
+prompt formatter introduced in NeMo 2.2+. Pod ships NeMo 2.0.0 which only
+exposes 'canary'. Falls back to nvidia/canary-1b which uses the old format.
+Caveat: canary-1b only officially supports en/de/es/fr — Arabic output is
+not meaningful (test verifies service contract / shape only).
+"""
 import logging
 import time
 from typing import Dict, Any, Optional
 import soundfile as sf
+import torch
+
+# Pod cuDNN init is broken (CUDNN_STATUS_NOT_INITIALIZED on conv ops).
+# Disable cuDNN — falls back to native CUDA kernels (slower but works).
+torch.backends.cudnn.enabled = False
 
 logger = logging.getLogger(__name__)
 

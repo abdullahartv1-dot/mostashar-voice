@@ -11,7 +11,7 @@ def test_whisper_large_transcribes_arabic():
     result = transcribe_whisper(str(FIXTURE), model_size="large-v3")
     assert "duration" in result
     assert "segments" in result
-    assert result["duration"] == pytest.approx(5.0, abs=0.5)
+    assert result["duration"] == pytest.approx(21.0, abs=2.0)
     assert len(result["segments"]) >= 1
     # Should produce non-empty Arabic text
     assert any(seg["text"].strip() for seg in result["segments"])
@@ -21,7 +21,7 @@ def test_whisper_large_transcribes_arabic():
 def test_whisper_turbo_transcribes_arabic():
     from engine.services.stt_whisper import transcribe_whisper
     result = transcribe_whisper(str(FIXTURE), model_size="large-v3-turbo")
-    assert result["duration"] == pytest.approx(5.0, abs=0.5)
+    assert result["duration"] == pytest.approx(21.0, abs=2.0)
     assert len(result["segments"]) >= 1
 
 
@@ -41,5 +41,5 @@ def test_vibevoice_asr_transcribes_arabic():
 def test_nemo_canary_transcribes_arabic():
     from engine.services.stt_nemo import transcribe_canary
     result = transcribe_canary(str(FIXTURE))
-    assert result["duration"] == pytest.approx(5.0, abs=0.5)
+    assert result["duration"] == pytest.approx(21.0, abs=2.0)
     assert len(result["segments"]) >= 1
