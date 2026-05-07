@@ -412,5 +412,70 @@ def api_progress():
         return jsonify(json.load(f))
 
 
+# ======== Voice Studio v2: Pod proxy ========
+import httpx as _httpx
+import os as _os
+
+POD_API = _os.environ.get("POD_API", "http://127.0.0.1:8000")  # SSH tunnel
+POD_API_KEY = _os.environ.get("VS_API_KEY", "dev-key-change-me")
+_pod_headers = {"X-API-Key": POD_API_KEY}
+
+
+@app.route('/v2')
+def v2_index():
+    return render_template('index_v2.html')
+
+
+@app.route('/v2/api/upload', methods=['POST'])
+def v2_upload():
+    f = request.files.get('audio') or request.files.get('file')
+    if not f:
+        return jsonify({"error": "no file"}), 400
+    files = {"file": (f.filename, f.stream, f.content_type or "audio/mpeg")}
+    r = _httpx.post(f"{POD_API}/api/upload", files=files, headers=_pod_headers, timeout=120)
+    return jsonify(r.json()), r.status_code
+
+
+@app.route('/v2/api/process', methods=['POST'])
+def v2_process():
+    data = request.json or {}
+    r = _httpx.post(f"{POD_API}/api/process", json=data, headers=_pod_headers, timeout=900)
+    return jsonify(r.json()), r.status_code
+
+
+@app.route('/v2/api/clone', methods=['POST'])
+def v2_clone():
+    data = request.json or {}
+    r = _httpx.post(f"{POD_API}/api/clone", json=data, headers=_pod_headers, timeout=600)
+    return jsonify(r.json()), r.status_code
+
+
+@app.route('/v2/api/jobs')
+def v2_jobs():
+    r = _httpx.get(f"{POD_API}/api/jobs", headers=_pod_headers, timeout=10)
+    return jsonify(r.json()), r.status_code
+
+
+@app.route('/v2/api/jobs/<job_id>')
+def v2_job(job_id):
+    r = _httpx.get(f"{POD_API}/api/jobs/{job_id}", headers=_pod_headers, timeout=10)
+    return jsonify(r.json()), r.status_code
+
+
+@app.route('/v2/api/costs')
+def v2_costs():
+    r = _httpx.get(f"{POD_API}/api/costs", headers=_pod_headers, timeout=10)
+    return jsonify(r.json()), r.status_code
+
+
+@app.route('/v2/files/<path:subpath>')
+def v2_files(subpath):
+    """Proxy files served by Pod /files/."""
+    r = _httpx.get(f"{POD_API}/files/{subpath}", headers=_pod_headers, timeout=120)
+    if r.status_code != 200:
+        return ("not found", 404)
+    return r.content, 200, {"Content-Type": r.headers.get("Content-Type", "application/octet-stream")}
+
+
 if __name__ == '__main__':
     app.run(debug=False, port=5000, host='127.0.0.1')
