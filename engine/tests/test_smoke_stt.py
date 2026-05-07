@@ -15,3 +15,11 @@ def test_whisper_large_transcribes_arabic():
     assert len(result["segments"]) >= 1
     # Should produce non-empty Arabic text
     assert any(seg["text"].strip() for seg in result["segments"])
+
+
+@pytest.mark.skipif(not FIXTURE.exists(), reason="fixture missing")
+def test_whisper_turbo_transcribes_arabic():
+    from engine.services.stt_whisper import transcribe_whisper
+    result = transcribe_whisper(str(FIXTURE), model_size="large-v3-turbo")
+    assert result["duration"] == pytest.approx(5.0, abs=0.5)
+    assert len(result["segments"]) >= 1
