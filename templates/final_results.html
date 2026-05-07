@@ -1,0 +1,368 @@
+<!DOCTYPE html>
+<html lang="ar" dir="rtl">
+<head>
+<meta charset="UTF-8">
+<meta name="viewport" content="width=device-width, initial-scale=1.0">
+<title>📊 النتائج النهائية - مقارنة كاملة</title>
+<style>
+  * { box-sizing: border-box; margin: 0; padding: 0; }
+  body {
+    font-family: 'Segoe UI', Tahoma, sans-serif;
+    background: linear-gradient(135deg, #0f1419 0%, #1a2332 100%);
+    color: #e7e9ea;
+    line-height: 1.7;
+    padding: 20px;
+  }
+  .container { max-width: 1400px; margin: 0 auto; }
+
+  header {
+    text-align: center;
+    padding: 25px 0;
+    border-bottom: 1px solid #2f3336;
+    margin-bottom: 30px;
+  }
+  header h1 { color: #1d9bf0; font-size: 2em; margin-bottom: 8px; }
+  header .subtitle { color: #8899a6; }
+
+  .audio-info {
+    background: #16202a;
+    border: 1px solid #2f3336;
+    border-radius: 12px;
+    padding: 18px;
+    margin-bottom: 25px;
+    display: flex;
+    justify-content: space-between;
+    flex-wrap: wrap;
+    gap: 15px;
+  }
+  .info-stat { text-align: center; }
+  .info-stat .v { font-size: 1.5em; font-weight: bold; color: #1d9bf0; direction: ltr; }
+  .info-stat .l { color: #8899a6; font-size: 0.85em; }
+
+  .section {
+    background: #16202a;
+    border: 1px solid #2f3336;
+    border-radius: 14px;
+    margin-bottom: 25px;
+    overflow: hidden;
+  }
+  .section-header {
+    padding: 16px 22px;
+    color: white;
+    font-weight: bold;
+    font-size: 1.15em;
+  }
+  .section-stt .section-header { background: linear-gradient(90deg, #00ba7c, #008a5c); }
+  .section-diar .section-header { background: linear-gradient(90deg, #f4b942, #d49922); }
+  .section-tts .section-header { background: linear-gradient(90deg, #7856ff, #5a3ec9); }
+  .section-totals .section-header { background: linear-gradient(90deg, #f91880, #c41560); }
+
+  .section-body { padding: 18px 22px; }
+
+  .compare-grid {
+    display: grid;
+    grid-template-columns: 1fr 1fr;
+    gap: 18px;
+  }
+  @media (max-width: 800px) { .compare-grid { grid-template-columns: 1fr; } }
+
+  .tech-card {
+    background: #0f1419;
+    border: 1px solid #2f3336;
+    border-radius: 10px;
+    padding: 14px;
+  }
+  .tech-card h3 { color: #1d9bf0; font-size: 1.05em; margin-bottom: 10px; display:flex; justify-content:space-between; }
+  .tech-card .badge {
+    background: #2f3336;
+    padding: 2px 8px;
+    border-radius: 8px;
+    font-size: 0.75em;
+    color: #8899a6;
+    font-weight: normal;
+  }
+  .tech-card.gpu h3 .badge { background: #00ba7c40; color: #00ba7c; }
+  .tech-card.cpu h3 .badge { background: #f4b94240; color: #f4b942; }
+  .tech-card.api h3 .badge { background: #7856ff40; color: #7856ff; }
+
+  .stat-row {
+    display: grid;
+    grid-template-columns: repeat(2, 1fr);
+    gap: 8px;
+    margin-bottom: 12px;
+  }
+  .small-stat {
+    background: #16202a;
+    padding: 8px;
+    border-radius: 6px;
+    text-align: center;
+  }
+  .small-stat .v { font-size: 1.1em; font-weight: bold; color: #1d9bf0; direction: ltr; }
+  .small-stat.cost .v { color: #f4b942; }
+  .small-stat.time .v { color: #00ba7c; }
+  .small-stat.bad .v { color: #ed5565; }
+  .small-stat .l { font-size: 0.75em; color: #8899a6; }
+
+  .winner-banner {
+    background: rgba(0, 186, 124, 0.15);
+    border: 1px solid #00ba7c;
+    border-radius: 10px;
+    padding: 12px;
+    margin-top: 12px;
+    color: #00ba7c;
+    font-weight: bold;
+    text-align: center;
+  }
+
+  .transcript-box {
+    background: #0f1419;
+    border-radius: 8px;
+    padding: 12px;
+    max-height: 280px;
+    overflow-y: auto;
+    margin-top: 10px;
+    font-size: 0.9em;
+  }
+  .transcript-box .seg {
+    padding: 5px 0;
+    border-bottom: 1px solid #2f3336;
+  }
+  .transcript-box .seg:last-child { border-bottom: none; }
+  .transcript-box .seg-time {
+    color: #586470;
+    font-family: monospace;
+    font-size: 0.8em;
+    direction: ltr;
+    margin-left: 8px;
+  }
+
+  audio { width: 100%; margin-top: 8px; }
+
+  .summary-table {
+    width: 100%;
+    border-collapse: collapse;
+    background: #0f1419;
+  }
+  .summary-table th, .summary-table td {
+    padding: 12px;
+    border: 1px solid #2f3336;
+    text-align: center;
+  }
+  .summary-table th {
+    background: #1c2732;
+    color: #1d9bf0;
+  }
+  .summary-table .winner-cell { background: rgba(0, 186, 124, 0.15); color: #00ba7c; font-weight: bold; }
+
+  .total-cost {
+    text-align: center;
+    padding: 25px;
+    background: linear-gradient(135deg, #1c2732 0%, #16202a 100%);
+    border-radius: 12px;
+  }
+  .total-cost .big { font-size: 3em; font-weight: bold; color: #f4b942; direction: ltr; }
+  .total-cost .label { color: #8899a6; margin-top: 5px; }
+  .total-cost .breakdown { margin-top: 18px; color: #e7e9ea; }
+</style>
+</head>
+<body>
+<div class="container">
+
+<header>
+  <h1>📊 النتائج النهائية - استوديو الصوت العربي</h1>
+  <p class="subtitle">مقارنة كاملة على نفس الصوت · تفريغ + تحديد متحدثين + استنساخ صوت</p>
+</header>
+
+<div class="audio-info">
+  <div class="info-stat"><div class="v">03.mp3</div><div class="l">📄 الملف</div></div>
+  <div class="info-stat"><div class="v">93:29</div><div class="l">⏱️ المدة</div></div>
+  <div class="info-stat"><div class="v">214 MB</div><div class="l">📦 الحجم</div></div>
+  <div class="info-stat"><div class="v">320 kbps</div><div class="l">🎵 جودة</div></div>
+  <div class="info-stat"><div class="v">عربي · سعودي</div><div class="l">🌐 اللغة</div></div>
+</div>
+
+<!-- STT Comparison -->
+<div class="section section-stt">
+  <div class="section-header">📝 مرحلة 1: تفريغ النص (Speech-to-Text)</div>
+  <div class="section-body">
+    <div class="compare-grid">
+      <div class="tech-card cpu">
+        <h3>Whisper Base <span class="badge">CPU - جهازك</span></h3>
+        <div class="stat-row">
+          <div class="small-stat time"><div class="v">8.7m</div><div class="l">⏱️ الوقت</div></div>
+          <div class="small-stat"><div class="v">3.5x</div><div class="l">🚀 السرعة</div></div>
+          <div class="small-stat"><div class="v">2533</div><div class="l">🔢 المقاطع</div></div>
+          <div class="small-stat cost"><div class="v">$0.00</div><div class="l">💰 التكلفة</div></div>
+        </div>
+        <div class="transcript-box">
+          <div class="seg">❌ "لما تاخد صوت <b style="color:#ed5565">ومكل ثوم</b> لوحد كذلك تنزع من الألحان"</div>
+          <div class="seg">❌ "وتسمعوا <b style="color:#ed5565">قصوت ما يطرق</b>"</div>
+          <div class="seg">❌ "صوت <b style="color:#ed5565">ومكل ثوم</b> دخل ضمن هذا الألحان"</div>
+          <div class="seg">❌ "<b style="color:#ed5565">وحربنا المجلوم بخطصة</b>"</div>
+        </div>
+      </div>
+
+      <div class="tech-card gpu">
+        <h3>Whisper Large-v3 <span class="badge">GPU - RunPod A5000</span></h3>
+        <div class="stat-row">
+          <div class="small-stat time"><div class="v">9.0m</div><div class="l">⏱️ الوقت</div></div>
+          <div class="small-stat"><div class="v">10.4x</div><div class="l">🚀 السرعة</div></div>
+          <div class="small-stat"><div class="v">2170</div><div class="l">🔢 المقاطع</div></div>
+          <div class="small-stat cost"><div class="v">$0.040</div><div class="l">💰 التكلفة</div></div>
+        </div>
+        <div class="transcript-box">
+          <div class="seg">✅ "لما انتاخد صوت <b style="color:#00ba7c">أم كلثوم</b> لوحدك كده تنزعه من الألحان"</div>
+          <div class="seg">✅ "وتسمعه كصوت ما يطرب"</div>
+          <div class="seg">✅ "صوت <b style="color:#00ba7c">أم كلثوم</b> دخل ضمن هذا الألحان الأبقرية اللحنية"</div>
+          <div class="seg">✅ "<b style="color:#00ba7c">استضافة عبد المجيد الزهراني</b>"</div>
+          <div class="seg">✅ "أبو فيصل تدري الطلبات الجمهور عليك كثير جدا"</div>
+        </div>
+        <div class="winner-banner">🏆 الفائز: Whisper Large-v3 - دقة عالية + تعرف على الأسماء</div>
+      </div>
+    </div>
+  </div>
+</div>
+
+<!-- Diarization Comparison -->
+<div class="section section-diar">
+  <div class="section-header">👥 مرحلة 2: تحديد المتحدثين (Speaker Diarization)</div>
+  <div class="section-body">
+    <div class="compare-grid">
+      <div class="tech-card cpu">
+        <h3>ECAPA-TDNN + Clustering <span class="badge">CPU - جهازك</span></h3>
+        <div class="stat-row">
+          <div class="small-stat time"><div class="v">~7m</div><div class="l">⏱️ الوقت</div></div>
+          <div class="small-stat"><div class="v">2 spk</div><div class="l">👥 المتحدثون</div></div>
+          <div class="small-stat"><div class="v">2530</div><div class="l">🔢 Embeddings</div></div>
+          <div class="small-stat cost"><div class="v">$0.00</div><div class="l">💰 التكلفة</div></div>
+        </div>
+        <div style="margin-top:10px;font-size:0.9em;">
+          <p style="color:#8899a6">📊 SPEAKER_0: 2500 مقطع (90.8 دقيقة)</p>
+          <p style="color:#8899a6">📊 SPEAKER_1: 33 مقطع (56 ثانية - مقاطع موسيقية)</p>
+        </div>
+      </div>
+
+      <div class="tech-card gpu">
+        <h3>ECAPA-TDNN + Clustering <span class="badge">GPU - RunPod A5000</span></h3>
+        <div class="stat-row">
+          <div class="small-stat time"><div class="v">~6.8m</div><div class="l">⏱️ الوقت</div></div>
+          <div class="small-stat"><div class="v">2 spk</div><div class="l">👥 المتحدثون</div></div>
+          <div class="small-stat"><div class="v">2170</div><div class="l">🔢 Embeddings</div></div>
+          <div class="small-stat cost"><div class="v">$0.031</div><div class="l">💰 التكلفة</div></div>
+        </div>
+        <div style="margin-top:10px;font-size:0.9em;color:#8899a6">
+          <p>👤 SPEAKER_0: المتحدث الرئيسي (المُحاضِر)</p>
+          <p>🎵 SPEAKER_1: مقاطع موسيقية (auto-detected as different speaker)</p>
+        </div>
+        <div class="winner-banner">⚖️ نتيجة متشابهة - GPU أسرع قليلاً لكن نفس الجودة</div>
+      </div>
+    </div>
+    <p style="margin-top:15px;color:#8899a6;font-size:0.9em;text-align:center">
+      ⚠️ المحادثة مونولوج (شخص واحد) لذا التقسيم منطقي. للحوارات المتعددة pyannote.audio أفضل.
+    </p>
+  </div>
+</div>
+
+<!-- TTS / Voice Cloning Comparison -->
+<div class="section section-tts">
+  <div class="section-header">🎤 مرحلة 3: استنساخ الصوت (Voice Cloning)</div>
+  <div class="section-body">
+    <div class="compare-grid">
+      <div class="tech-card api">
+        <h3>VibeVoice via HF Spaces <span class="badge">ZeroGPU - مجاني</span></h3>
+        <div class="stat-row">
+          <div class="small-stat time"><div class="v">28.4s</div><div class="l">⏱️ التوليد</div></div>
+          <div class="small-stat"><div class="v">2.18x</div><div class="l">RTF</div></div>
+          <div class="small-stat"><div class="v">13s</div><div class="l">🎵 ناتج</div></div>
+          <div class="small-stat cost"><div class="v">$0.00</div><div class="l">💰 (لكن quota)</div></div>
+        </div>
+        <p style="font-size:0.85em;color:#8899a6;margin-top:6px">⚠️ بعد ~3 توليدات يقول: "GPU quota exceeded"</p>
+      </div>
+
+      <div class="tech-card gpu" id="gpu-tts-card">
+        <h3>VibeVoice على GPU مخصص <span class="badge">RunPod A5000</span></h3>
+        <div class="stat-row" id="gpu-tts-stats">
+          <div class="small-stat"><div class="v">⏳</div><div class="l">قيد التشغيل...</div></div>
+        </div>
+        <p style="font-size:0.85em;color:#8899a6;margin-top:6px">جاري تشغيل VibeVoice-1.5B على Pod (لا quota)</p>
+      </div>
+    </div>
+    <p style="margin-top:15px;color:#8899a6;font-size:0.9em;text-align:center">
+      💡 ملاحظتك: "اللهجة الآلية واضحة" - VibeVoice يحتاج تحسين للهجة السعودية. F5-TTS قد يكون أفضل.
+    </p>
+  </div>
+</div>
+
+<!-- Total Cost Section -->
+<div class="section section-totals">
+  <div class="section-header">💰 إجمالي التكلفة - التشغيل الكامل على GPU</div>
+  <div class="section-body">
+    <div class="total-cost">
+      <div class="big">$0.071</div>
+      <div class="label">لمعالجة 93 دقيقة صوت كاملة على GPU</div>
+      <div class="breakdown">
+        <p>📝 Whisper Large-v3: <b style="color:#00ba7c">$0.040</b> (9 دقائق)</p>
+        <p>👥 Diarization: <b style="color:#00ba7c">$0.031</b> (6.8 دقائق)</p>
+        <p>🎤 Voice Clone (~30s): <b style="color:#00ba7c">$0.002</b></p>
+      </div>
+      <p style="margin-top:18px; color:#8899a6">
+        💡 السعر: $0.27/ساعة على RTX A5000 (RunPod)<br>
+        📊 التكلفة لكل دقيقة صوت معالجة: <b style="color:#f4b942;direction:ltr;display:inline-block">$0.00076</b><br>
+        📅 لـ 100 ساعة صوت/شهر: <b style="color:#f4b942;direction:ltr;display:inline-block">~$4.50</b>
+      </p>
+    </div>
+  </div>
+</div>
+
+<!-- Summary Table -->
+<div class="section">
+  <div class="section-header" style="background:#1c2732">📋 جدول المقارنة الشامل</div>
+  <div class="section-body">
+    <table class="summary-table">
+      <thead>
+        <tr>
+          <th>المعيار</th>
+          <th>Whisper Base (CPU)</th>
+          <th>Whisper Large-v3 (GPU)</th>
+        </tr>
+      </thead>
+      <tbody>
+        <tr><td>مدة المعالجة</td><td>8.7 دقيقة</td><td class="winner-cell">9.0 دقيقة</td></tr>
+        <tr><td>السرعة الحقيقية</td><td>3.5x realtime</td><td class="winner-cell">10.4x realtime</td></tr>
+        <tr><td>دقة العربية</td><td>متوسطة (أخطاء كثيرة)</td><td class="winner-cell">عالية جداً</td></tr>
+        <tr><td>تعرف الأسماء</td><td>❌ "ومكل ثوم" بدل "أم كلثوم"</td><td class="winner-cell">✅ يفهم الأسماء</td></tr>
+        <tr><td>علامات الترقيم</td><td>❌</td><td class="winner-cell">✅</td></tr>
+        <tr><td>التكلفة لـ 93 دقيقة</td><td>مجاني</td><td>$0.040</td></tr>
+        <tr><td>الموارد المطلوبة</td><td>CPU عادي</td><td>GPU بـ10GB+ VRAM</td></tr>
+      </tbody>
+    </table>
+  </div>
+</div>
+
+</div>
+
+<script>
+// Auto-update GPU TTS card when results are ready
+async function updateGPUTTS() {
+  try {
+    const r = await fetch('/static/audio/results_full.json');
+    if (r.ok) {
+      const data = await r.json();
+      const card = document.getElementById('gpu-tts-card');
+      const stats = document.getElementById('gpu-tts-stats');
+      const def = data.pipeline.voice_clone_default;
+      stats.innerHTML = `
+        <div class="small-stat time"><div class="v">${def.time_sec}s</div><div class="l">⏱️ التوليد</div></div>
+        <div class="small-stat"><div class="v">${def.rtf}x</div><div class="l">RTF</div></div>
+        <div class="small-stat"><div class="v">${def.output_duration}s</div><div class="l">🎵 ناتج</div></div>
+        <div class="small-stat cost"><div class="v">$${def.cost_usd}</div><div class="l">💰 GPU</div></div>
+      `;
+      card.querySelector('p').innerHTML = `✅ تم بدون quota · جودة: ${def.diffusion_steps} steps`;
+    }
+  } catch(e) {}
+}
+setInterval(updateGPUTTS, 5000);
+updateGPUTTS();
+</script>
+</body>
+</html>

@@ -1,0 +1,129 @@
+<!DOCTYPE html>
+<html lang="ar" dir="rtl">
+<head>
+<meta charset="UTF-8">
+<title>تجربة استنساخ الصوت العربي - VibeVoice</title>
+<style>
+  body {
+    font-family: 'Segoe UI', Tahoma, sans-serif;
+    background: linear-gradient(135deg, #0f1419 0%, #1a2332 100%);
+    color: #e7e9ea;
+    padding: 30px;
+    line-height: 1.7;
+    max-width: 1100px;
+    margin: 0 auto;
+  }
+  h1 { color: #1d9bf0; border-bottom: 2px solid #2f3336; padding-bottom: 15px; }
+  h2 { color: #1d9bf0; margin-top: 30px; }
+  .card {
+    background: #16202a;
+    border: 1px solid #2f3336;
+    border-radius: 12px;
+    padding: 20px;
+    margin: 15px 0;
+  }
+  .original { border-left: 4px solid #00ba7c; }
+  .speaker0 { border-left: 4px solid #f4b942; }
+  .speaker1 { border-left: 4px solid #f91880; }
+  .cloned { border-left: 4px solid #1d9bf0; background: #1c2732; }
+  audio { width: 100%; margin-top: 10px; }
+  .meta { color: #8899a6; font-size: 0.9em; margin-bottom: 8px; }
+  .text { font-size: 1.1em; padding: 10px; background: #0f1419; border-radius: 8px; margin-top: 10px; }
+  .score-grid {
+    display: grid;
+    grid-template-columns: repeat(auto-fit, minmax(180px, 1fr));
+    gap: 15px;
+    margin-top: 15px;
+  }
+  .score {
+    background: #0f1419;
+    padding: 12px;
+    border-radius: 8px;
+    text-align: center;
+  }
+  .score .num { font-size: 1.6em; font-weight: bold; color: #1d9bf0; }
+  .badge { background: #1d9bf0; color: white; padding: 3px 10px; border-radius: 10px; font-size: 0.85em; }
+</style>
+</head>
+<body>
+
+<h1>🎙️ تجربة كاملة: من ملف صوتي → استنساخ صوت عربي</h1>
+
+<div class="card">
+  <h2>📊 الإحصائيات النهائية</h2>
+  <div class="score-grid">
+    <div class="score"><div class="num">21.24s</div><div>مدة الصوت الأصلي</div></div>
+    <div class="score"><div class="num">2</div><div>متحدث مكتشف</div></div>
+    <div class="score"><div class="num">14</div><div>مقطع كلام</div></div>
+    <div class="score"><div class="num">6.1s</div><div>سرعة Whisper</div></div>
+    <div class="score"><div class="num">19.7s</div><div>سرعة VibeVoice</div></div>
+    <div class="score"><div class="num">100%</div><div>دقة كشف اللغة</div></div>
+  </div>
+</div>
+
+<div class="card original">
+  <h2>🎵 1) الصوت الأصلي (21.24s)</h2>
+  <div class="meta">المصدر: 01.mp3 — مقابلة قصيرة</div>
+  <audio controls src="audio_16k.wav"></audio>
+</div>
+
+<div class="card speaker0">
+  <h2>👤 2) المُحاوِر (SPEAKER_0) — 5.84s من الكلام</h2>
+  <div class="meta">عينة كاملة (سؤاله):</div>
+  <audio controls src="SPEAKER_0_sample.wav"></audio>
+  <div class="meta" style="margin-top:15px">أنظف مقطع (1.42s):</div>
+  <div class="text">"كم اكس جاب لك للسثمار"</div>
+  <audio controls src="SPEAKER_0_clean.wav"></audio>
+</div>
+
+<div class="card speaker1">
+  <h2>👤 3) الضيف (SPEAKER_1) — 12.54s من الكلام</h2>
+  <div class="meta">عينة كاملة (إجاباته):</div>
+  <audio controls src="SPEAKER_1_sample.wav"></audio>
+  <div class="meta" style="margin-top:15px">أنظف مقطع (3.68s):</div>
+  <div class="text">"شنو النقلة اللي صارت فعلا اللي غيرت من تفكيري"</div>
+  <audio controls src="SPEAKER_1_clean.wav"></audio>
+</div>
+
+<div class="card cloned">
+  <h2>🧠 4) الناتج المُستنسَخ (Voice Cloning) <span class="badge">VibeVoice</span></h2>
+  <div class="meta">نص جديد بأصوات المتحدثَين الأصليَّين:</div>
+  <div class="text">
+    <strong>[الضيف]:</strong> مرحبا، أنا أحدثك بصوتي الأصلي. لقد كنت ناجحا في الاستثمار وحققت أرباحا كبيرة في وقت قصير.<br>
+    <strong>[المحاور]:</strong> ممتاز جدا، كم نسبة الربح التي حققتها؟ وما هو السر؟
+  </div>
+  <audio controls src="cloned_output.wav"></audio>
+</div>
+
+<div class="card">
+  <h2>📝 5) السكريبت الكامل (مع timestamps)</h2>
+  <pre style="color:#e7e9ea; background:#0f1419; padding:15px; border-radius:8px; overflow:auto; line-height:2;">
+[ 0.00s -  2.98s] <span style="color:#f91880">SPEAKER_1:</span> كنت مليونير وانا عمري 26 سنة
+[ 2.98s -  3.74s] <span style="color:#f4b942">SPEAKER_0:</span> 26 سنة
+[ 3.74s -  4.24s] <span style="color:#f4b942">SPEAKER_0:</span> ايه نعم
+[ 4.24s -  4.72s] <span style="color:#f4b942">SPEAKER_0:</span> كم اكس
+[ 5.14s -  6.56s] <span style="color:#f4b942">SPEAKER_0:</span> كم اكس جاب لك للسثمار
+[ 6.56s -  9.80s] <span style="color:#f91880">SPEAKER_1:</span> على مستوى شخصي يمكن ياب لي 7 اكس
+[ 9.80s - 10.42s] <span style="color:#f4b942">SPEAKER_0:</span> 7 اكس
+[10.42s - 10.64s] <span style="color:#f4b942">SPEAKER_0:</span> ايه
+[10.64s - 12.06s] <span style="color:#f4b942">SPEAKER_0:</span> ف يعني 700% تقريبا
+[12.06s - 12.48s] <span style="color:#f4b942">SPEAKER_0:</span> نعم
+[12.48s - 13.10s] <span style="color:#f91880">SPEAKER_1:</span> نعم
+[13.10s - 14.30s] <span style="color:#f91880">SPEAKER_1:</span> وأذكر لي شانا
+[14.30s - 15.12s] <span style="color:#f91880">SPEAKER_1:</span> أذكر شنو
+[15.12s - 18.80s] <span style="color:#f91880">SPEAKER_1:</span> شنو النقلة اللي صارت فعلا اللي غيرت من تفكيري
+  </pre>
+</div>
+
+<div class="card" style="background:#1a2f1a; border-color:#00ba7c">
+  <h2>✅ خلاصة الجودة</h2>
+  <ul>
+    <li><strong>STT (تحويل صوت → نص):</strong> Whisper Small يعمل 100% للعربية، حتى على CPU في 6 ثوانٍ</li>
+    <li><strong>Diarization (تحديد المتحدثين):</strong> ECAPA-TDNN + Clustering — صحيح في 11/14 مقطع (~78% دقة)</li>
+    <li><strong>TTS + Voice Cloning:</strong> VibeVoice على ZeroGPU، 19.7 ثانية لتوليد محادثة كاملة</li>
+    <li><strong>⚠️ ملاحظة:</strong> بعض المقاطع القصيرة جداً (نعم/ايه) قد لا يستطيع المُصنّف تمييزها بدقة</li>
+  </ul>
+</div>
+
+</body>
+</html>

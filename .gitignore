@@ -1,0 +1,48 @@
+# Audio files (large)
+*.mp3
+*.mp4
+*.wav
+*.m4a
+*.ogg
+
+# Generated outputs
+static/audio/jobs/
+static/audio/*/audio_16k.wav
+static/audio/*/orig*
+static/audio/*/clone*
+long_results/
+long_results_old/
+long_results_v2/
+
+# Model caches
+pretrained_models/
+*.pt
+*.bin
+*.safetensors
+
+# Python
+__pycache__/
+*.pyc
+*.pyo
+.pytest_cache/
+.venv/
+venv/
+
+# Logs
+*.log
+nohup.out
+
+# Local secrets
+.env
+.env.*
+
+# Editor
+.vscode/
+.idea/
+
+# OS
+.DS_Store
+Thumbs.db
+
+# Allow keeping fixtures
+!engine/tests/fixtures/short_arabic.wav

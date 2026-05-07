@@ -1,0 +1,976 @@
+<!DOCTYPE html>
+<html lang="ar" dir="rtl">
+<head>
+<meta charset="UTF-8">
+<meta name="viewport" content="width=device-width, initial-scale=1.0">
+<title>فهرسة محادثة X – 123😈</title>
+<style>
+  * { box-sizing: border-box; margin: 0; padding: 0; }
+  body {
+    font-family: 'Segoe UI', Tahoma, sans-serif;
+    background: linear-gradient(135deg, #0f1419 0%, #1a2332 100%);
+    color: #e7e9ea;
+    line-height: 1.7;
+    min-height: 100vh;
+  }
+  .container { max-width: 1400px; margin: 0 auto; padding: 20px; }
+  header {
+    text-align: center;
+    padding: 30px 0;
+    border-bottom: 2px solid #2f3336;
+    margin-bottom: 30px;
+  }
+  header h1 {
+    font-size: 2.2em;
+    color: #1d9bf0;
+    margin-bottom: 10px;
+  }
+  header p { color: #8899a6; font-size: 1em; }
+
+  .stats {
+    display: grid;
+    grid-template-columns: repeat(auto-fit, minmax(180px, 1fr));
+    gap: 15px;
+    margin-bottom: 30px;
+  }
+  .stat-card {
+    background: #16202a;
+    padding: 18px;
+    border-radius: 12px;
+    border: 1px solid #2f3336;
+    text-align: center;
+  }
+  .stat-card .num { font-size: 2em; font-weight: bold; color: #1d9bf0; }
+  .stat-card .label { color: #8899a6; font-size: 0.9em; margin-top: 5px; }
+
+  .search-box {
+    background: #16202a;
+    padding: 15px;
+    border-radius: 12px;
+    margin-bottom: 25px;
+    border: 1px solid #2f3336;
+    display: flex;
+    gap: 10px;
+    flex-wrap: wrap;
+    align-items: center;
+  }
+  .search-box input {
+    flex: 1;
+    min-width: 200px;
+    padding: 12px 16px;
+    background: #0f1419;
+    border: 1px solid #2f3336;
+    border-radius: 25px;
+    color: #e7e9ea;
+    font-size: 1em;
+  }
+  .search-box input:focus { outline: none; border-color: #1d9bf0; }
+
+  .filter-buttons {
+    display: flex;
+    flex-wrap: wrap;
+    gap: 8px;
+    margin-bottom: 25px;
+  }
+  .filter-btn {
+    padding: 8px 16px;
+    background: #16202a;
+    border: 1px solid #2f3336;
+    color: #e7e9ea;
+    border-radius: 20px;
+    cursor: pointer;
+    font-size: 0.9em;
+    transition: all 0.2s;
+  }
+  .filter-btn:hover { background: #1d9bf0; color: white; }
+  .filter-btn.active {
+    background: #1d9bf0;
+    color: white;
+    border-color: #1d9bf0;
+  }
+
+  .category {
+    margin-bottom: 35px;
+    background: #16202a;
+    border-radius: 16px;
+    border: 1px solid #2f3336;
+    overflow: hidden;
+  }
+  .category-header {
+    padding: 18px 25px;
+    background: linear-gradient(90deg, #1d9bf0 0%, #1a8cd8 100%);
+    cursor: pointer;
+    display: flex;
+    justify-content: space-between;
+    align-items: center;
+    font-weight: 600;
+    font-size: 1.2em;
+    color: white;
+  }
+  .category-header:hover { opacity: 0.9; }
+  .category-header .badge {
+    background: rgba(255,255,255,0.25);
+    padding: 4px 12px;
+    border-radius: 12px;
+    font-size: 0.85em;
+  }
+  .category-content {
+    padding: 0;
+    max-height: none;
+    overflow: hidden;
+    transition: max-height 0.3s;
+  }
+  .category-content.collapsed { max-height: 0; }
+
+  .item {
+    padding: 18px 25px;
+    border-bottom: 1px solid #2f3336;
+    transition: background 0.2s;
+  }
+  .item:last-child { border-bottom: none; }
+  .item:hover { background: #1c2732; }
+  .item-header {
+    display: flex;
+    justify-content: space-between;
+    align-items: center;
+    flex-wrap: wrap;
+    gap: 10px;
+    margin-bottom: 8px;
+  }
+  .item-sender {
+    font-weight: 600;
+    color: #1d9bf0;
+    font-size: 1.05em;
+  }
+  .item-date {
+    color: #8899a6;
+    font-size: 0.85em;
+    background: #0f1419;
+    padding: 3px 10px;
+    border-radius: 10px;
+  }
+  .item-topic {
+    color: #e7e9ea;
+    font-weight: 500;
+    margin-bottom: 5px;
+  }
+  .item-use {
+    color: #8899a6;
+    font-size: 0.95em;
+  }
+  .item-tag {
+    display: inline-block;
+    background: #2f3336;
+    color: #1d9bf0;
+    padding: 2px 8px;
+    border-radius: 8px;
+    font-size: 0.75em;
+    margin-right: 5px;
+    margin-top: 6px;
+  }
+
+  .toc {
+    background: #16202a;
+    padding: 20px;
+    border-radius: 12px;
+    margin-bottom: 25px;
+    border: 1px solid #2f3336;
+  }
+  .toc h3 { margin-bottom: 12px; color: #1d9bf0; }
+  .toc ul { list-style: none; display: grid; grid-template-columns: repeat(auto-fit, minmax(250px, 1fr)); gap: 8px; }
+  .toc a {
+    color: #e7e9ea;
+    text-decoration: none;
+    padding: 8px 12px;
+    background: #0f1419;
+    border-radius: 8px;
+    display: block;
+    transition: all 0.2s;
+    font-size: 0.95em;
+  }
+  .toc a:hover { background: #1d9bf0; color: white; }
+
+  footer {
+    text-align: center;
+    padding: 30px 0;
+    color: #8899a6;
+    font-size: 0.9em;
+    border-top: 1px solid #2f3336;
+    margin-top: 40px;
+  }
+
+  .hidden { display: none !important; }
+
+  @media (max-width: 600px) {
+    header h1 { font-size: 1.5em; }
+    .container { padding: 12px; }
+    .item-header { flex-direction: column; align-items: flex-start; }
+  }
+</style>
+</head>
+<body>
+<div class="container">
+
+<header>
+  <h1>📨 فهرسة محادثة X مع 123😈</h1>
+  <p>أرشيف تفاعلي لـ85 رسالة مشاركة منذ مارس 2025</p>
+</header>
+
+<div class="stats">
+  <div class="stat-card"><div class="num">85</div><div class="label">إجمالي الرسائل</div></div>
+  <div class="stat-card"><div class="num">9</div><div class="label">فئات رئيسية</div></div>
+  <div class="stat-card"><div class="num">3</div><div class="label">أشهر التغطية</div></div>
+  <div class="stat-card"><div class="num">60+</div><div class="label">مشروع/أداة</div></div>
+</div>
+
+<div class="search-box">
+  <input type="text" id="searchInput" placeholder="🔍 ابحث عن أداة، مرسل، أو موضوع...">
+</div>
+
+<div class="filter-buttons">
+  <button class="filter-btn active" data-filter="all">📋 الكل</button>
+  <button class="filter-btn" data-filter="claude">🤖 Claude Code</button>
+  <button class="filter-btn" data-filter="design">🎨 DESIGN.md</button>
+  <button class="filter-btn" data-filter="agents">🧠 Multi-Agent</button>
+  <button class="filter-btn" data-filter="opensource">🔓 Open Source</button>
+  <button class="filter-btn" data-filter="leadgen">💼 Lead Gen</button>
+  <button class="filter-btn" data-filter="webapp">🌐 Web/App</button>
+  <button class="filter-btn" data-filter="voice">🎤 Voice/3D</button>
+  <button class="filter-btn" data-filter="business">📊 Business</button>
+  <button class="filter-btn" data-filter="education">📚 Education</button>
+</div>
+
+<div class="toc">
+  <h3>🗂️ فهرس سريع</h3>
+  <ul>
+    <li><a href="#cat-claude">🤖 Claude Code &amp; Skills (12)</a></li>
+    <li><a href="#cat-design">🎨 DESIGN.md &amp; Figma (7)</a></li>
+    <li><a href="#cat-agents">🧠 Multi-Agent Systems (10)</a></li>
+    <li><a href="#cat-opensource">🔓 بدائل Open Source (12)</a></li>
+    <li><a href="#cat-leadgen">💼 Lead Gen &amp; Outreach (5)</a></li>
+    <li><a href="#cat-webapp">🌐 توليد مواقع/تطبيقات (6)</a></li>
+    <li><a href="#cat-voice">🎤 Voice / 3D / Media (3)</a></li>
+    <li><a href="#cat-business">📊 ريادة أعمال (4)</a></li>
+    <li><a href="#cat-education">📚 محتوى تعليمي (3)</a></li>
+  </ul>
+</div>
+
+<!-- ============= CATEGORIES ============= -->
+
+<div class="category" data-category="claude" id="cat-claude">
+  <div class="category-header" onclick="toggleCategory(this)">
+    <span>🤖 Claude Code &amp; Skills</span>
+    <span class="badge">12 رسالة</span>
+  </div>
+  <div class="category-content">
+
+    <div class="item" data-keywords="claude code local free خالد">
+      <div class="item-header"><span class="item-sender">خالد Ai</span><span class="item-date">Mar 31</span></div>
+      <div class="item-topic">تشغيل Claude Code محلياً مجاناً</div>
+      <div class="item-use">بدون تكاليف API ولا حدود استخدام – خصوصية كاملة 100% على الجهاز</div>
+      <span class="item-tag">Local</span><span class="item-tag">Free</span>
+    </div>
+
+    <div class="item" data-keywords="claude code documentation faisal تسريب">
+      <div class="item-header"><span class="item-sender">FAISAL</span><span class="item-date">Mar 31</span></div>
+      <div class="item-topic">توثيق تسريب Claude Code</div>
+      <div class="item-use">شرح كامل لكيفية عمل CLI الذي ظل سراً منذ إطلاقه</div>
+      <span class="item-tag">Documentation</span><span class="item-tag">Leak</span>
+    </div>
+
+    <div class="item" data-keywords="vineet claude code documentation pipeline memory">
+      <div class="item-header"><span class="item-sender">Vineet</span><span class="item-date">Mar 31</span></div>
+      <div class="item-topic">Documentation شامل لـ Claude Code</div>
+      <div class="item-use">شرح Pipeline + إدارة الذاكرة + معالجة السياق</div>
+      <span class="item-tag">Docs</span>
+    </div>
+
+    <div class="item" data-keywords="redonex python rewrite codex dmca">
+      <div class="item-header"><span class="item-sender">RedOneX</span><span class="item-date">Mar 31</span></div>
+      <div class="item-topic">إعادة كتابة Claude Code بـ Python</div>
+      <div class="item-use">512K سطر TS تحولت إلى Python في ليلة بسبب خوف من DMCA – 47K⭐ في 5 ساعات</div>
+      <span class="item-tag">Rewrite</span><span class="item-tag">Python</span>
+    </div>
+
+    <div class="item" data-keywords="redonex claude code leaked تسريب">
+      <div class="item-header"><span class="item-sender">RedOneX</span><span class="item-date">Mar 31</span></div>
+      <div class="item-topic">تسريب كود Claude Code</div>
+      <div class="item-use">خبر تسريب الكود الأصلي للأداة</div>
+      <span class="item-tag">Leak</span>
+    </div>
+
+    <div class="item" data-keywords="best practice gittrend claude code">
+      <div class="item-header"><span class="item-sender">GitTrend</span><span class="item-date">Apr 12</span></div>
+      <div class="item-topic">claude-code-best-practice + 4 مشاريع Agent</div>
+      <div class="item-use">حلول للهلوسات وفقدان السياق – workflows + templates لـClaude Code</div>
+      <span class="item-tag">Best Practice</span>
+    </div>
+
+    <div class="item" data-keywords="agent skills addy osmani loonggg">
+      <div class="item-header"><span class="item-sender">loonggg</span><span class="item-date">Apr 21</span></div>
+      <div class="item-topic">Agent Skills من Addy Osmani</div>
+      <div class="item-use">20 مهارة + 7 أوامر (/spec, /plan, /build, /test, /ship) – يدعم Claude Code وGemini وCodex وCursor (18K⭐)</div>
+      <span class="item-tag">Skills</span><span class="item-tag">Workflow</span>
+    </div>
+
+    <div class="item" data-keywords="kshitij mishra deeptutor github repos claude code">
+      <div class="item-header"><span class="item-sender">Kshitij Mishra</span><span class="item-date">Apr 17</span></div>
+      <div class="item-topic">أفضل GitHub repos لـClaude Code 2026</div>
+      <div class="item-use">Claude Mem (cross sessions)، UI UX Pro Max (50+ styles)، وأكثر</div>
+      <span class="item-tag">Tools</span>
+    </div>
+
+    <div class="item" data-keywords="charly wargnier anthropic agents masterclass">
+      <div class="item-header"><span class="item-sender">Charly Wargnier</span><span class="item-date">Apr 17</span></div>
+      <div class="item-topic">Masterclass من مهندس Anthropic</div>
+      <div class="item-use">كاتب "Building Effective Agents" – شرح 14 دقيقة يوفر شهور من البحث</div>
+      <span class="item-tag">Tutorial</span>
+    </div>
+
+    <div class="item" data-keywords="ahmad awais deepseek opus claude evals">
+      <div class="item-header"><span class="item-sender">Ahmad Awais</span><span class="item-date">May 3</span></div>
+      <div class="item-topic">DeepSeek V4 Pro vs Opus 4.7</div>
+      <div class="item-use">DeepSeek V4 Pro هزم Opus 4.7 في 6/10 من evals الداخلية بعد إصلاح quirks في tool calling</div>
+      <span class="item-tag">Models</span><span class="item-tag">Comparison</span>
+    </div>
+
+    <div class="item" data-keywords="abdullah fawzan shopify chinese 13 agents">
+      <div class="item-header"><span class="item-sender">عبدالله الفوزان</span><span class="item-date">May 6</span></div>
+      <div class="item-topic">صيني بنى 13 وكيل Claude Code لـShopify</div>
+      <div class="item-use">يخدم 200 عميل dropshipping شهرياً، $800/متجر، تكلفة <$80/يوم – بدون فريق ولا مدراء</div>
+      <span class="item-tag">Use Case</span><span class="item-tag">Multi-Agent</span>
+    </div>
+
+    <div class="item" data-keywords="regent0x chinese 320k solo developer agents">
+      <div class="item-header"><span class="item-sender">regent0x</span><span class="item-date">May 1</span></div>
+      <div class="item-topic">مطور صيني $320K/سنة بمفرده</div>
+      <div class="item-use">5 وكلاء AI متوازين (architect, coder, reviewer, tester, ops) – بدون مشاركة سياق</div>
+      <span class="item-tag">Solo Dev</span>
+    </div>
+
+  </div>
+</div>
+
+<div class="category" data-category="design" id="cat-design">
+  <div class="category-header" onclick="toggleCategory(this)">
+    <span>🎨 DESIGN.md &amp; Figma Plugins</span>
+    <span class="badge">7 رسائل</span>
+  </div>
+  <div class="category-content">
+
+    <div class="item" data-keywords="design.md google stitch github community">
+      <div class="item-header"><span class="item-sender">GitHub Projects Community</span><span class="item-date">Apr 1</span></div>
+      <div class="item-topic">DESIGN.md من Google Stitch</div>
+      <div class="item-use">ملف Markdown يقرأه LLM لتوليد UI متناسق – نسخة تصميم من README.md (Stripe, Vercel, Linear, Notion)</div>
+      <span class="item-tag">Concept</span>
+    </div>
+
+    <div class="item" data-keywords="lucas figma plugin design.md generator skill.md">
+      <div class="item-header"><span class="item-sender">lucas</span><span class="item-date">Apr 28</span></div>
+      <div class="item-topic">DESIGN.md Generator – Figma Plugin</div>
+      <div class="item-use">يحوّل tokens (ألوان، خطوط، spacing) إلى DESIGN.md + SKILL.md – يعمل محلياً بدون APIs</div>
+      <span class="item-tag">Figma</span><span class="item-tag">MIT</span>
+    </div>
+
+    <div class="item" data-keywords="zoltan figma plugin design.md skill.md tokens">
+      <div class="item-header"><span class="item-sender">Zoltán Szőgyényi</span><span class="item-date">Apr 27</span></div>
+      <div class="item-topic">Figma Plugin لاستخراج Tokens</div>
+      <div class="item-use">يولّد DESIGN.md و SKILL.md – يعمل مع كل أدوات AI – open-source MIT</div>
+      <span class="item-tag">Figma</span>
+    </div>
+
+    <div class="item" data-keywords="abdulrahman thiyab design.md ui agents arabic">
+      <div class="item-header"><span class="item-sender">د. عبدالرحمن ذياب</span><span class="item-date">May 1</span></div>
+      <div class="item-topic">2000 ملف DESIGN.md للأذكياء الاصطناعيين</div>
+      <div class="item-use">حلّ مشكلة ضعف واجهات الـAgents بعرضها لتصاميم عالية الجودة</div>
+      <span class="item-tag">AI UI</span>
+    </div>
+
+    <div class="item" data-keywords="alvaro cintas design md modern ai files">
+      <div class="item-header"><span class="item-sender">Alvaro Cintas</span><span class="item-date">May 4</span></div>
+      <div class="item-topic">2000+ DESIGN.md من أفضل المنتجات</div>
+      <div class="item-use">يعمل مع Claude Code, Cursor, Lovable, Bolt – بديل لكتابة "make it look modern"</div>
+      <span class="item-tag">Library</span>
+    </div>
+
+    <div class="item" data-keywords="ricoui design md sites refero neuform">
+      <div class="item-header"><span class="item-sender">RicoUI</span><span class="item-date">May 6</span></div>
+      <div class="item-topic">قائمة مواقع DESIGN.md</div>
+      <div class="item-use">refero (الأشمل: 2000+ ملف)، neuform (visual)، designmd.me، designmd.supply، getdesign.md</div>
+      <span class="item-tag">Resources</span>
+    </div>
+
+    <div class="item" data-keywords="tom huang open claude design reverse">
+      <div class="item-header"><span class="item-sender">Tom Huang</span><span class="item-date">Apr 28</span></div>
+      <div class="item-topic">Open Claude Design (95% restoration)</div>
+      <div class="item-use">18,700+ سطر، 30+ Skills، يدعم 71 design system وكل code agents</div>
+      <span class="item-tag">Templates</span>
+    </div>
+
+  </div>
+</div>
+
+<div class="category" data-category="agents" id="cat-agents">
+  <div class="category-header" onclick="toggleCategory(this)">
+    <span>🧠 Multi-Agent Systems</span>
+    <span class="badge">10 رسائل</span>
+  </div>
+  <div class="category-content">
+
+    <div class="item" data-keywords="fdy 3 agents glm research analyst writer arabic">
+      <div class="item-header"><span class="item-sender">Fdy</span><span class="item-date">Mar 30</span></div>
+      <div class="item-topic">3 وكلاء (Research + Analysis + Email)</div>
+      <div class="item-use">بنموذج GLM-5.1 – للبحث عن مشاريع منافسة وتحليل نقاط ضعفها وكتابة بريد للعملاء</div>
+      <span class="item-tag">Outreach</span>
+    </div>
+
+    <div class="item" data-keywords="fdy findx github 3 agents kanban next.js">
+      <div class="item-header"><span class="item-sender">Fdy</span><span class="item-date">Apr 1</span></div>
+      <div class="item-topic">FindX على GitHub – 3 وكلاء AI</div>
+      <div class="item-use">Search Agent + Analysis Agent + Outreach Agent – واجهة Kanban (Next.js, Docker, PostgreSQL)</div>
+      <span class="item-tag">SaaS</span>
+    </div>
+
+    <div class="item" data-keywords="juan multica managed agents claude open source">
+      <div class="item-header"><span class="item-sender">Juan</span><span class="item-date">Apr 11</span></div>
+      <div class="item-topic">Multica – استنساخ Claude Managed Agents</div>
+      <div class="item-use">تشغيل Coding Agents حقيقية على سيرفرك بدون السحابة – 4000⭐</div>
+      <span class="item-tag">Self-host</span>
+    </div>
+
+    <div class="item" data-keywords="leonard rodman rowboat ai coworker local llm">
+      <div class="item-header"><span class="item-sender">Leonard Rodman</span><span class="item-date">Apr 17</span></div>
+      <div class="item-topic">Rowboat – AI Coworker محلي</div>
+      <div class="item-use">يبني Knowledge Graph من البريد والملاحظات – يعمل مع أي LLM – وكلاء يعملون خلال نومك</div>
+      <span class="item-tag">Local</span>
+    </div>
+
+    <div class="item" data-keywords="erick aiden ai operating system local windows linux">
+      <div class="item-header"><span class="item-sender">Erick</span><span class="item-date">Apr 27</span></div>
+      <div class="item-topic">Aiden – نظام تشغيل AI كامل</div>
+      <div class="item-use">1500+ مهارة، 89+ أداة، يتحكم بالماوس والكيبورد، 6-layer memory، Discord/Telegram – Ollama محلياً</div>
+      <span class="item-tag">JARVIS</span>
+    </div>
+
+    <div class="item" data-keywords="0xMarioNawfal 147 agents company open source">
+      <div class="item-header"><span class="item-sender">0xMarioNawfal</span><span class="item-date">May 1</span></div>
+      <div class="item-topic">شركة AI كاملة من 147 وكيل</div>
+      <div class="item-use">فرق Engineering, Marketing, Sales, Finance, Support – أمر واحد للنشر</div>
+      <span class="item-tag">Enterprise</span>
+    </div>
+
+    <div class="item" data-keywords="joruno agentic design patterns book chapters">
+      <div class="item-header"><span class="item-sender">Joruno</span><span class="item-date">May 1</span></div>
+      <div class="item-topic">كتاب Agentic Design Patterns</div>
+      <div class="item-use">21 فصل + 7 ملاحق + Jupyter Notebooks – يغطي prompt chaining، multi-agent، memory، safety</div>
+      <span class="item-tag">Book</span>
+    </div>
+
+    <div class="item" data-keywords="gold legal contract ai agents github 5">
+      <div class="item-header"><span class="item-sender">GOLD</span><span class="item-date">Apr 28</span></div>
+      <div class="item-topic">AI Legal Assistant على GitHub</div>
+      <div class="item-use">5 وكلاء يحللون العقد في 60 ثانية – Risk dashboard، plain English، obligation timeline – Claude Code</div>
+      <span class="item-tag">Legal</span>
+    </div>
+
+    <div class="item" data-keywords="daily dose data science art agent reinforcement training">
+      <div class="item-header"><span class="item-sender">Daily Dose of Data Science</span><span class="item-date">Apr 28</span></div>
+      <div class="item-topic">ART (Agent Reinforcement Trainer)</div>
+      <div class="item-use">framework لتدريب وكلاء بـGRPO + RULER بدون reward functions يدوية</div>
+      <span class="item-tag">RL</span><span class="item-tag">Training</span>
+    </div>
+
+    <div class="item" data-keywords="ramakrushna sentrux codebase architecture rust tree-sitter">
+      <div class="item-header"><span class="item-sender">𝗿𝗮𝗺𝗮𝗸𝗿𝘂𝘀𝗵𝗻𝗮</span><span class="item-date">Apr 29</span></div>
+      <div class="item-topic">Sentrux – قياس صحة معمارية الكود</div>
+      <div class="item-use">يقيّم Modularity, Cycles, Depth – Rust + tree-sitter لـ52 لغة – يقدّم تغذية راجعة للوكلاء</div>
+      <span class="item-tag">Quality</span>
+    </div>
+
+  </div>
+</div>
+
+<div class="category" data-category="opensource" id="cat-opensource">
+  <div class="category-header" onclick="toggleCategory(this)">
+    <span>🔓 بدائل Open Source لخدمات مدفوعة</span>
+    <span class="badge">12 رسالة</span>
+  </div>
+  <div class="category-content">
+
+    <div class="item" data-keywords="navtoor openscreen screen studio recording">
+      <div class="item-header"><span class="item-sender">Nav Toor</span><span class="item-date">Mar 31</span></div>
+      <div class="item-topic">OpenScreen – بديل Screen Studio</div>
+      <div class="item-use">تسجيل شاشة احترافي مجاني – Auto-zoom, Smooth cursor – $89 → 0 (8400⭐)</div>
+      <span class="item-tag">Recording</span>
+    </div>
+
+    <div class="item" data-keywords="向阳乔木 recordly screen studio open source mac windows linux">
+      <div class="item-header"><span class="item-sender">向阳乔木</span><span class="item-date">Apr 9</span></div>
+      <div class="item-topic">Recordly – بديل Screen Studio آخر</div>
+      <div class="item-use">يدعم Mac/Windows/Linux معاً – أخف وأسرع – يوفر 1500 RMB</div>
+      <span class="item-tag">Recording</span>
+    </div>
+
+    <div class="item" data-keywords="erick easyinvoicepdf invoice generator free">
+      <div class="item-header"><span class="item-sender">Erick</span><span class="item-date">Apr 16</span></div>
+      <div class="item-topic">EasyInvoicePDF – مولد فواتير</div>
+      <div class="item-use">معاينة PDF لحظية، 120+ عملة، 10+ لغات – خصوصية كاملة في المتصفح</div>
+      <span class="item-tag">Invoicing</span>
+    </div>
+
+    <div class="item" data-keywords="navtoor onlook cursor designers react visual">
+      <div class="item-header"><span class="item-sender">Nav Toor</span><span class="item-date">Apr 17</span></div>
+      <div class="item-topic">Onlook – Cursor للمصممين</div>
+      <div class="item-use">تحرير React بصرياً مع تحديث الكود تلقائياً – بديل Figma ($15) و Webflow ($29) – 23,900⭐</div>
+      <span class="item-tag">Design</span>
+    </div>
+
+    <div class="item" data-keywords="sukh sroay carbon erp open source manufacturing">
+      <div class="item-header"><span class="item-sender">Sukh Sroay</span><span class="item-date">Apr 19</span></div>
+      <div class="item-topic">Carbon – بديل ERP مفتوح المصدر</div>
+      <div class="item-use">بديل SAP و Oracle لشركات التصنيع – من عصر Fax إلى Modern</div>
+      <span class="item-tag">ERP</span>
+    </div>
+
+    <div class="item" data-keywords="tim jayas product demo motion blur cursor">
+      <div class="item-header"><span class="item-sender">Tim Jayas</span><span class="item-date">Apr 19</span></div>
+      <div class="item-topic">أداة فيديو منتجات</div>
+      <div class="item-use">Motion blur + Zoom + Cursor smoothing + Timeline editor + MP4/GIF + MacOS capture</div>
+      <span class="item-tag">Video</span>
+    </div>
+
+    <div class="item" data-keywords="berryxia trellis microsoft 3d image model">
+      <div class="item-header"><span class="item-sender">Berryxia.AI</span><span class="item-date">Apr 26</span></div>
+      <div class="item-topic">TRELLIS.2 من Microsoft</div>
+      <div class="item-use">4B parameter لتحويل صورة → 3D في 3 ثواني – PBR materials + open surfaces</div>
+      <span class="item-tag">3D</span>
+    </div>
+
+    <div class="item" data-keywords="mohini shewale 320000 free public apis list">
+      <div class="item-header"><span class="item-sender">Mohini Shewale</span><span class="item-date">Apr 26</span></div>
+      <div class="item-topic">320,000+ Public APIs مجانية</div>
+      <div class="item-use">Weather, finance, news, sports, crypto, AI/ML, Government open data</div>
+      <span class="item-tag">APIs</span>
+    </div>
+
+    <div class="item" data-keywords="github community omniget media downloader youtube tiktok">
+      <div class="item-header"><span class="item-sender">GitHub Projects Community</span><span class="item-date">Apr 30</span></div>
+      <div class="item-topic">OmniGet – منزّل وسائط</div>
+      <div class="item-use">YouTube، X، TikTok، Reddit، Udemy – Native desktop app بدون إعلانات</div>
+      <span class="item-tag">Downloader</span>
+    </div>
+
+    <div class="item" data-keywords="mohd danish dashboard analytics conversions affiliates">
+      <div class="item-header"><span class="item-sender">Mohd Danish</span><span class="item-date">Apr 30</span></div>
+      <div class="item-topic">لوحة تحكم Analytics شاملة</div>
+      <div class="item-use">Conversions + Affiliates + Google Search Console + Backups – 500+⭐</div>
+      <span class="item-tag">Analytics</span>
+    </div>
+
+    <div class="item" data-keywords="mohd danish analytics open source self-hosted sqlite">
+      <div class="item-header"><span class="item-sender">Mohd Danish</span><span class="item-date">Mar 22</span></div>
+      <div class="item-topic">منصة Analytics بديلة</div>
+      <div class="item-use">Self-hosted على VPS بـ$4 – Stripe tracking + Cloudflare geo + بديل اشتراك $50/شهر</div>
+      <span class="item-tag">Analytics</span>
+    </div>
+
+    <div class="item" data-keywords="tom dorr ticketing platform self-hosted events">
+      <div class="item-header"><span class="item-sender">Tom Dörr</span><span class="item-date">May 1</span></div>
+      <div class="item-topic">منصة تذاكر فعاليات Self-hosted</div>
+      <div class="item-use">بديل مفتوح المصدر لمنصات التذاكر التجارية</div>
+      <span class="item-tag">Events</span>
+    </div>
+
+  </div>
+</div>
+
+<div class="category" data-category="leadgen" id="cat-leadgen">
+  <div class="category-header" onclick="toggleCategory(this)">
+    <span>💼 Lead Generation &amp; Outreach</span>
+    <span class="badge">5 رسائل</span>
+  </div>
+  <div class="category-content">
+
+    <div class="item" data-keywords="bill investor mapileads b2b lead generation google maps">
+      <div class="item-header"><span class="item-sender">Bill The Investor</span><span class="item-date">Apr 28</span></div>
+      <div class="item-topic">MapiLeads – أداة B2B شاملة</div>
+      <div class="item-use">30+ حقل/شركة من Google Maps + AI يقرأ 50 مراجعة + إيميلات مخصصة + CRM + 221 دولة (بُنيت في أسبوعين بـClaude Code)</div>
+      <span class="item-tag">B2B</span>
+    </div>
+
+    <div class="item" data-keywords="divyansh tiwari google maps business database csv">
+      <div class="item-header"><span class="item-sender">divyansh tiwari</span><span class="item-date">Apr 27</span></div>
+      <div class="item-topic">Google Maps → قاعدة بيانات أعمال</div>
+      <div class="item-use">بحث واحد → أسماء، أرقام، مواقع، مراجعات، ساعات → CSV</div>
+      <span class="item-tag">Scraping</span>
+    </div>
+
+    <div class="item" data-keywords="simplifying ai google maps scrape business csv">
+      <div class="item-header"><span class="item-sender">Simplifying AI</span><span class="item-date">Apr 26</span></div>
+      <div class="item-topic">أداة Scrape كل أعمال Google Maps</div>
+      <div class="item-use">Name, address, phone, website, reviews, hours – CSV export</div>
+      <span class="item-tag">Scraping</span>
+    </div>
+
+    <div class="item" data-keywords="sprytix american girl house chatgpt outreach">
+      <div class="item-header"><span class="item-sender">Sprytix</span><span class="item-date">May 4</span></div>
+      <div class="item-topic">قصة فتاة 14 اشترت بيت كاش</div>
+      <div class="item-use">مثال على استخدام Google Maps + ChatGPT 5.5 لـcold outreach (HVAC company)</div>
+      <span class="item-tag">Story</span>
+    </div>
+
+    <div class="item" data-keywords="sent api send messages channels">
+      <div class="item-header"><span class="item-sender">sent</span><span class="item-date">Mar 7</span></div>
+      <div class="item-topic">One API لإرسال الرسائل</div>
+      <div class="item-use">إرسال رسائل عبر كل القنوات بـAPI واحد</div>
+      <span class="item-tag">Messaging</span>
+    </div>
+
+  </div>
+</div>
+
+<div class="category" data-category="webapp" id="cat-webapp">
+  <div class="category-header" onclick="toggleCategory(this)">
+    <span>🌐 توليد المواقع والتطبيقات بـAI</span>
+    <span class="badge">6 رسائل</span>
+  </div>
+  <div class="category-content">
+
+    <div class="item" data-keywords="thamir cinematic website gemini seedance">
+      <div class="item-header"><span class="item-sender">ثامر الغالي</span><span class="item-date">Apr 17</span></div>
+      <div class="item-topic">بناء موقع سينمائي بـAI</div>
+      <div class="item-use">شرح 16 دقيقة لاستخدام Gemini 3.1 + Seedance 2.0 لمواقع تسويقية بمستوى $10K</div>
+      <span class="item-tag">Tutorial</span>
+    </div>
+
+    <div class="item" data-keywords="viktor oddy gemini seedance cinematic websites tutorial">
+      <div class="item-header"><span class="item-sender">Viktor Oddy</span><span class="item-date">Apr 16</span></div>
+      <div class="item-topic">Tutorial: مواقع سينمائية</div>
+      <div class="item-use">Gemini 3.1 + Seedance 2.0 – بناء مواقع تسويقية فاخرة بالكامل بـAI</div>
+      <span class="item-tag">Tutorial</span>
+    </div>
+
+    <div class="item" data-keywords="gold open lovable firecrawl react website clone">
+      <div class="item-header"><span class="item-sender">GOLD</span><span class="item-date">Apr 26</span></div>
+      <div class="item-topic">Open Lovable من Firecrawl</div>
+      <div class="item-use">استنساخ أي موقع كـReact App – يدعم OpenAI/Anthropic/Gemini/Grok – E2B sandbox – 24K⭐</div>
+      <span class="item-tag">Clone</span>
+    </div>
+
+    <div class="item" data-keywords="sultan fardan site to app website mobile claude">
+      <div class="item-header"><span class="item-sender">سلطان الفردان</span><span class="item-date">Apr 30</span></div>
+      <div class="item-topic">ميزة Site → App بزر واحد</div>
+      <div class="item-use">لصق رابط الموقع → Claude Opus 4.7 يحلل التصميم ويبني تطبيق iOS/Android</div>
+      <span class="item-tag">Mobile</span>
+    </div>
+
+    <div class="item" data-keywords="how to ai mapcn react map shadcn">
+      <div class="item-header"><span class="item-sender">How To AI</span><span class="item-date">Apr 30</span></div>
+      <div class="item-topic">mapcn – خرائط React</div>
+      <div class="item-use">مكوّنات خرائط جميلة zero config + يعمل مع shadcn/ui</div>
+      <span class="item-tag">Component</span>
+    </div>
+
+    <div class="item" data-keywords="hasan toor drafted home design 3d ai">
+      <div class="item-header"><span class="item-sender">Hasan Toor</span><span class="item-date">May 6</span></div>
+      <div class="item-topic">Drafted – تصميم منزل مخصص</div>
+      <div class="item-use">ارسم أي شكل والـAI يبني الباقي – 3D واقعي، Real time – 100% مجاني</div>
+      <span class="item-tag">Design</span>
+    </div>
+
+  </div>
+</div>
+
+<div class="category" data-category="voice" id="cat-voice">
+  <div class="category-header" onclick="toggleCategory(this)">
+    <span>🎤 Voice / 3D / Media AI</span>
+    <span class="badge">3 رسائل</span>
+  </div>
+  <div class="category-content">
+
+    <div class="item" data-keywords="malik vibevoice microsoft voice clone 50 languages">
+      <div class="item-header"><span class="item-sender">مالك بن حمود المالك</span><span class="item-date">Mar 30</span></div>
+      <div class="item-topic">VibeVoice من Microsoft</div>
+      <div class="item-use">استنساخ صوت من 10 ثوانٍ، 90 دقيقة محادثة، 50+ لغة، 200ms – بديل ElevenLabs ($99) مجاناً (28.5K⭐)</div>
+      <span class="item-tag">Voice</span>
+    </div>
+
+    <div class="item" data-keywords="amir musi claude openart worlds virtual production pipeline">
+      <div class="item-header"><span class="item-sender">AmirMušić</span><span class="item-date">Mar 23</span></div>
+      <div class="item-topic">Claude + OpenArt Worlds Pipeline</div>
+      <div class="item-use">Framework لبناء design pipelines بمستوى وكالات إنتاج إعلانية</div>
+      <span class="item-tag">Production</span>
+    </div>
+
+    <div class="item" data-keywords="meigen image prompt library zahrani">
+      <div class="item-header"><span class="item-sender">يز7 عبدالله الزهراني</span><span class="item-date">Mar 21</span></div>
+      <div class="item-topic">MeiGen – أكبر مكتبة بروبتس صور</div>
+      <div class="item-use">يجمع أشهر بروبتس Image generation من X أسبوعياً في مكان واحد</div>
+      <span class="item-tag">Prompts</span>
+    </div>
+
+  </div>
+</div>
+
+<div class="category" data-category="business" id="cat-business">
+  <div class="category-header" onclick="toggleCategory(this)">
+    <span>📊 ريادة أعمال &amp; استثمار</span>
+    <span class="badge">5 رسائل</span>
+  </div>
+  <div class="category-content">
+
+    <div class="item" data-keywords="jawla uplane marketing agency seed funding ai">
+      <div class="item-header"><span class="item-sender">جولة</span><span class="item-date">Apr 19</span></div>
+      <div class="item-topic">Uplane تجمع $4.5M Seed</div>
+      <div class="item-use">شركة أمريكية لاستبدال وكالات التسويق التقليدية بـAI – بقيادة PlayVentures</div>
+      <span class="item-tag">Funding</span>
+    </div>
+
+    <div class="item" data-keywords="sefr lwahd nerby investment story technology product">
+      <div class="item-header"><span class="item-sender">صفر لواحد</span><span class="item-date">Apr 10</span></div>
+      <div class="item-topic">قصة شركة Nerby</div>
+      <div class="item-use">درس استثماري: التقنية قبل المنتج – 3 سنوات و3 أشهر، 15 مستثمر، استثمار في 20 دقيقة</div>
+      <span class="item-tag">Lesson</span>
+    </div>
+
+    <div class="item" data-keywords="sefr lwahd robotics market 25 trillion 2050 morgan stanley">
+      <div class="item-header"><span class="item-sender">صفر لواحد</span><span class="item-date">Mar 23</span></div>
+      <div class="item-topic">سوق الروبوتات – $25T بحلول 2050</div>
+      <div class="item-use">تقرير Morgan Stanley – السوق الحالي $91B، نمو مركّب 13% منذ 2015</div>
+      <span class="item-tag">Market</span>
+    </div>
+
+    <div class="item" data-keywords="navtoor adobe figma 20 billion ipo nyse fig">
+      <div class="item-header"><span class="item-sender">Nav Toor</span><span class="item-date">Apr 25</span></div>
+      <div class="item-topic">قصة Adobe + Figma + IPO</div>
+      <div class="item-use">انهيار صفقة $20B في 2022 → Figma طُرحت في NYSE (FIG) في يوليو 2025</div>
+      <span class="item-tag">IPO</span>
+    </div>
+
+    <div class="item" data-keywords="retrochainer patents margin claude mac mini">
+      <div class="item-header"><span class="item-sender">RetroChainer</span><span class="item-date">Apr 28</span></div>
+      <div class="item-topic">Claude يحسب هامش ربح من براءة اختراع</div>
+      <div class="item-use">$1.80 تكلفة → $11.99 سعر = 44% هامش – Mac Mini + Claude Code في ليلة</div>
+      <span class="item-tag">Use Case</span>
+    </div>
+
+  </div>
+</div>
+
+<div class="category" data-category="education" id="cat-education">
+  <div class="category-header" onclick="toggleCategory(this)">
+    <span>📚 محتوى تعليمي &amp; تعلم</span>
+    <span class="badge">4 رسائل</span>
+  </div>
+  <div class="category-content">
+
+    <div class="item" data-keywords="kshitij mishra deeptutor ai tutor adaptive personalized">
+      <div class="item-header"><span class="item-sender">Kshitij Mishra</span><span class="item-date">Apr 17</span></div>
+      <div class="item-topic">DeepTutor – معلم AI تكيّفي</div>
+      <div class="item-use">يختبرك → يفهم عقلك → يبني خطة مخصصة لك – +6.4K⭐ في أسبوع</div>
+      <span class="item-tag">Learning</span>
+    </div>
+
+    <div class="item" data-keywords="robin delta russian notebooklm gemini obsidian learn">
+      <div class="item-header"><span class="item-sender">Robin Delta</span><span class="item-date">Mar 22</span></div>
+      <div class="item-topic">طريقة روسية لتعلم 10x أسرع</div>
+      <div class="item-use">NotebookLM + Gemini + Obsidian لتعلم أي شيء بسرعة فائقة</div>
+      <span class="item-tag">Workflow</span>
+    </div>
+
+    <div class="item" data-keywords="hankai build your own x github 480k repository">
+      <div class="item-header"><span class="item-sender">HankAI</span><span class="item-date">Apr 12</span></div>
+      <div class="item-topic">build-your-own-x – 480K⭐</div>
+      <div class="item-use">مسار تعلم: ابنِ كل شيء من الصفر – Game/DB/OS/Neural Net/Bots بـC/C++/Python</div>
+      <span class="item-tag">Learning</span>
+    </div>
+
+    <div class="item" data-keywords="guri singh github repos 9-to-5 income calendly">
+      <div class="item-header"><span class="item-sender">Guri Singh</span><span class="item-date">May 5</span></div>
+      <div class="item-topic">10 GitHub repos استبدلت دخل وظيفة</div>
+      <div class="item-use">يبدأ بـCal.com (بديل Calendly مفتوح) – والباقي مذكور في القائمة</div>
+      <span class="item-tag">Income</span>
+    </div>
+
+  </div>
+</div>
+
+<div class="category" data-category="other" id="cat-other">
+  <div class="category-header" onclick="toggleCategory(this)">
+    <span>📌 أخرى (متفرقات + روابط)</span>
+    <span class="badge">25 رسالة</span>
+  </div>
+  <div class="category-content">
+
+    <div class="item" data-keywords="rtl helper browser extension arabic claude">
+      <div class="item-header"><span class="item-sender">(Mar 22)</span><span class="item-date">Mar 22</span></div>
+      <div class="item-topic">RTL Helper – إضافة متصفح</div>
+      <div class="item-use">دعم اللغة العربية RTL في Claude والمواقع المختلفة</div>
+      <span class="item-tag">Extension</span>
+    </div>
+
+    <div class="item" data-keywords="god of prompt ai bundle marketing sales operations">
+      <div class="item-header"><span class="item-sender">God of Prompt</span><span class="item-date">Mar 23</span></div>
+      <div class="item-topic">حزمة بروبتس للأعمال (Pay once)</div>
+      <div class="item-use">بروبتس تسويق ومبيعات وعمليات + Custom prompts غير محدودة</div>
+      <span class="item-tag">Bundle</span>
+    </div>
+
+    <div class="item" data-keywords="thamir comma four autonomous driving">
+      <div class="item-header"><span class="item-sender">ثامر الغالي</span><span class="item-date">Nov 9, 2025</span></div>
+      <div class="item-topic">جهاز Comma four للقيادة الذاتية</div>
+      <div class="item-use">يدعم 325+ نوع سيارات (لا Volvo) – 5 دقائق تركيب – أكبر هاكر آيفون وPS</div>
+      <span class="item-tag">Hardware</span>
+    </div>
+
+    <div class="item" data-keywords="thamir comma.ai code leaked">
+      <div class="item-header"><span class="item-sender">ثامر الغالي</span><span class="item-date">Apr 1</span></div>
+      <div class="item-topic">تسريب كود comma.ai</div>
+      <div class="item-use">خبر تسريب كود مشروع القيادة الذاتية</div>
+      <span class="item-tag">News</span>
+    </div>
+
+    <div class="item" data-keywords="joruno spendsmart 14 year old ios receipt gemini">
+      <div class="item-header"><span class="item-sender">Joruno</span><span class="item-date">Apr 21</span></div>
+      <div class="item-topic">SpendSmart – طالب 14 سنة</div>
+      <div class="item-use">تطبيق iOS لقراءة الفواتير بالكاميرا – مبني على Gemini 2.0 Flash – مجاني على App Store</div>
+      <span class="item-tag">iOS</span>
+    </div>
+
+    <div class="item" data-keywords="joruno mac open source apps awesome list">
+      <div class="item-header"><span class="item-sender">Joruno</span><span class="item-date">Apr 28</span></div>
+      <div class="item-topic">قائمة Open Source Mac Apps</div>
+      <div class="item-use">أتمتة + أدوات تطوير + إنتاجية + Audio/Video + اجتماعي</div>
+      <span class="item-tag">List</span>
+    </div>
+
+    <div class="item" data-keywords="huashu design reverse engineer claude design">
+      <div class="item-header"><span class="item-sender">花叔</span><span class="item-date">Apr 20</span></div>
+      <div class="item-topic">Huashu Design (Reverse-engineered)</div>
+      <div class="item-use">إعادة هندسة Claude Design – إصدار مجاني مفتوح المصدر</div>
+      <span class="item-tag">Reverse</span>
+    </div>
+
+    <div class="item" data-keywords="hypernative wallet drainer security web3">
+      <div class="item-header"><span class="item-sender">HypernativeLabs</span><span class="item-date">Feb 11</span></div>
+      <div class="item-topic">أمن محافظ Web3 – Drainer Playbook</div>
+      <div class="item-use">شرح خدع المحتالين: NFTs مزيفة، spoofing، social engineering</div>
+      <span class="item-tag">Security</span>
+    </div>
+
+    <div class="item" data-keywords="michal barus wordpress astro tailwind agency">
+      <div class="item-header"><span class="item-sender">Michal Barus</span><span class="item-date">Apr 30</span></div>
+      <div class="item-topic">WordPress → Astro</div>
+      <div class="item-use">انتقال وكالة بعد 15 سنة WP – أسرع وأنظف وصيانة أقل (Astro + Tailwind)</div>
+      <span class="item-tag">Migration</span>
+    </div>
+
+    <div class="item" data-keywords="pa13l0 seo rust technical audit nginx apache">
+      <div class="item-header"><span class="item-sender">PA13L0</span><span class="item-date">Apr 30</span></div>
+      <div class="item-topic">أداة SEO تقني بـRust</div>
+      <div class="item-use">فحص Nginx/Apache – crawling – GEO+SEO معاً – للوكالات</div>
+      <span class="item-tag">SEO</span>
+    </div>
+
+    <div class="item" data-keywords="blaze llama 70b macbook plane offline">
+      <div class="item-header"><span class="item-sender">Blaze</span><span class="item-date">Apr 30</span></div>
+      <div class="item-topic">Llama 70B محلياً على MacBook</div>
+      <div class="item-use">صيني شغّله على MacBook Pro M4 (64GB) في طائرة 11 ساعة بدون إنترنت</div>
+      <span class="item-tag">Story</span>
+    </div>
+
+    <div class="item" data-keywords="geek lite cooktap terminal typing game claude waiting">
+      <div class="item-header"><span class="item-sender">Geek Lite</span><span class="item-date">Apr 12</span></div>
+      <div class="item-topic">CookTap – لعبة كتابة في الترمنال</div>
+      <div class="item-use">تسلية أثناء انتظار AI Code – WPM, accuracy, combos – 230 تمرين</div>
+      <span class="item-tag">Fun</span>
+    </div>
+
+    <div class="item" data-keywords="geek lite geoflow seo content production">
+      <div class="item-header"><span class="item-sender">Geek Lite</span><span class="item-date">Apr 16</span></div>
+      <div class="item-topic">GEOFlow – نظام محتوى GEO/SEO</div>
+      <div class="item-use">model config + asset management + draft review + frontend publishing</div>
+      <span class="item-tag">CMS</span>
+    </div>
+
+    <div class="item" data-keywords="miguel pdf markdown library firecrawl rust python">
+      <div class="item-header"><span class="item-sender">Miguel Ángel Durán</span><span class="item-date">Apr 16</span></div>
+      <div class="item-topic">PDF → Markdown سريع</div>
+      <div class="item-use">يستخرج جداول ومعادلات – Node.js + Python + Rust – لـfine-tuning</div>
+      <span class="item-tag">PDF</span>
+    </div>
+
+    <div class="item" data-keywords="nasser alnasser owlbrain multi-llm debate cursor">
+      <div class="item-header"><span class="item-sender">Nasser AlNasser</span><span class="item-date">Mar 23</span></div>
+      <div class="item-topic">OwlBrain – منصة نقاش Multi-LLM</div>
+      <div class="item-use">منظّم نقاشات منظّمة بين نماذج LLM متعددة – Cursor + Claude Opus + GPT-5.4 – SQLite + Railway</div>
+      <span class="item-tag">Open Source</span>
+    </div>
+
+    <div class="item" data-keywords="abdulqader jubarti reply nasser">
+      <div class="item-header"><span class="item-sender">عبدالقادر الجبرتي</span><span class="item-date">May 6</span></div>
+      <div class="item-topic">"مسير أم مخير"</div>
+      <div class="item-use">رد على @nasser حول OwlBrain</div>
+      <span class="item-tag">Reply</span>
+    </div>
+
+    <div class="item" data-keywords="links shruti avid gipp khairallah viktor تامر">
+      <div class="item-header"><span class="item-sender">روابط متفرقة</span><span class="item-date">متعدد</span></div>
+      <div class="item-topic">روابط/مقاطع فيديو</div>
+      <div class="item-use">رسائل من Shruti Codes (Apr 16)، Avid (Apr 15)، Gipp 🦅 (Apr 28)، Khairallah (Apr 30)، Viktor Oddy، timbidefi (May 4)، وفر فلوسك (May 6)، Avi Chawla (Apr 28) – روابط t.co</div>
+      <span class="item-tag">Links</span>
+    </div>
+
+  </div>
+</div>
+
+<footer>
+  <p>📊 الفهرس مُولّد آلياً من تصفح المحادثة على X DM</p>
+  <p>المحادثة تركّز على: AI tools, Open-source projects, Claude Code ecosystem</p>
+</footer>
+
+</div>
+
+<script>
+function toggleCategory(el) {
+  const content = el.nextElementSibling;
+  content.classList.toggle('collapsed');
+}
+
+const searchInput = document.getElementById('searchInput');
+const items = document.querySelectorAll('.item');
+const categories = document.querySelectorAll('.category');
+
+searchInput.addEventListener('input', () => {
+  const q = searchInput.value.trim().toLowerCase();
+  let any = false;
+  categories.forEach(cat => {
+    let hasMatch = false;
+    cat.querySelectorAll('.item').forEach(item => {
+      const text = (item.innerText + ' ' + (item.dataset.keywords||'')).toLowerCase();
+      const match = !q || text.includes(q);
+      item.classList.toggle('hidden', !match);
+      if (match) hasMatch = true;
+    });
+    cat.classList.toggle('hidden', !hasMatch);
+    if (hasMatch) any = true;
+  });
+});
+
+const filterBtns = document.querySelectorAll('.filter-btn');
+filterBtns.forEach(btn => {
+  btn.addEventListener('click', () => {
+    filterBtns.forEach(b => b.classList.remove('active'));
+    btn.classList.add('active');
+    const f = btn.dataset.filter;
+    categories.forEach(cat => {
+      const show = (f === 'all') || (cat.dataset.category === f);
+      cat.classList.toggle('hidden', !show);
+    });
+    searchInput.value = '';
+  });
+});
+</script>
+
+</body>
+</html>

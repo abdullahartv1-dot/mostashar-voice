@@ -1,0 +1,100 @@
+{
+  "audio_url": "/static/audio/bda1f2c1/audio_16k.wav",
+  "duration": 21.24625,
+  "job_id": "bda1f2c1",
+  "lang_prob": 1,
+  "samples": {
+    "SPEAKER_0": {
+      "duration": 6.66,
+      "url": "/static/audio/bda1f2c1/SPEAKER_0_sample.wav"
+    },
+    "SPEAKER_1": {
+      "duration": 14.3,
+      "url": "/static/audio/bda1f2c1/SPEAKER_1_sample.wav"
+    }
+  },
+  "segments": [
+    {
+      "end": 2.94,
+      "speaker": "SPEAKER_1",
+      "start": 0.0,
+      "text": "كنت مليونير وانا عمري ستعشر سنة"
+    },
+    {
+      "end": 3.74,
+      "speaker": "SPEAKER_0",
+      "start": 2.94,
+      "text": "ستعشر سنة"
+    },
+    {
+      "end": 4.26,
+      "speaker": "SPEAKER_0",
+      "start": 3.74,
+      "text": "ايه نعم"
+    },
+    {
+      "end": 4.72,
+      "speaker": "SPEAKER_0",
+      "start": 4.26,
+      "text": "كم اكس"
+    },
+    {
+      "end": 6.58,
+      "speaker": "SPEAKER_0",
+      "start": 5.16,
+      "text": "كم اكس تابل كلسة ثمار"
+    },
+    {
+      "end": 9.82,
+      "speaker": "SPEAKER_1",
+      "start": 6.58,
+      "text": "على مستوى شخصي يمكن يابل سبن اكس"
+    },
+    {
+      "end": 10.42,
+      "speaker": "SPEAKER_0",
+      "start": 9.82,
+      "text": "سبن اكس"
+    },
+    {
+      "end": 12.08,
+      "speaker": "SPEAKER_0",
+      "start": 10.42,
+      "text": "يعني سبع مئة في المئة تقريبا"
+    },
+    {
+      "end": 12.62,
+      "speaker": "SPEAKER_1",
+      "start": 12.08,
+      "text": "نعم"
+    },
+    {
+      "end": 13.14,
+      "speaker": "SPEAKER_1",
+      "start": 12.62,
+      "text": "نعم"
+    },
+    {
+      "end": 14.16,
+      "speaker": "SPEAKER_1",
+      "start": 13.14,
+      "text": "وأذكر ليش أنا"
+    },
+    {
+      "end": 15.12,
+      "speaker": "SPEAKER_1",
+      "start": 14.16,
+      "text": "أذكر شنو"
+    },
+    {
+      "end": 18.8,
+      "speaker": "SPEAKER_1",
+      "start": 15.12,
+      "text": "شنو النقلة اللي صارت فعلا اللي غيرت من تفكيري"
+    }
+  ],
+  "timings": {
+    "diarize": 1.9,
+    "transcribe": 6.1
+  }
+}
