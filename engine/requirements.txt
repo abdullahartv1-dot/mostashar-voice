@@ -1,0 +1,33 @@
+# Core
+fastapi==0.115.0
+uvicorn[standard]==0.30.6
+pydantic==2.9.2
+python-multipart==0.0.12
+httpx==0.27.2
+
+# Audio I/O
+soundfile==0.12.1
+imageio-ffmpeg==0.5.1
+librosa==0.10.2
+av==13.0.0
+
+# STT
+faster-whisper==1.0.3
+nemo-toolkit[asr]==2.0.0
+
+# Diarization
+pyannote.audio==3.3.1
+speechbrain==1.0.2
+
+# TTS
+TTS==0.22.0
+
+# ML core (torch already provided by Pod template - DO NOT reinstall)
+transformers==4.51.3
+scikit-learn==1.5.2
+numpy==1.26.4
+
+# VibeVoice deps
+diffusers==0.30.3
+accelerate==0.34.2
+peft==0.13.0
