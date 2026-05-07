@@ -31,3 +31,16 @@ def test_f5_tts_clones_arabic():
     assert Path(out_path).exists()
     import soundfile as sf
     assert sf.info(out_path).duration > 0.5
+
+
+@pytest.mark.skipif(not REFERENCE.exists(), reason="fixture missing")
+def test_xtts_v2_clones_arabic():
+    from engine.services.tts_xtts import clone_xtts
+    out_path = clone_xtts(
+        text=TEST_TEXT,
+        reference_audio=str(REFERENCE),
+        language="ar",
+    )
+    assert Path(out_path).exists()
+    import soundfile as sf
+    assert sf.info(out_path).duration > 0.5
