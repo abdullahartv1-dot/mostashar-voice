@@ -1,4 +1,7 @@
-"""ECAPA-TDNN + agglomerative clustering diarization (no HF token required)."""
+"""ECAPA-TDNN + agglomerative clustering diarization (no HF token required).
+
+Auto-detects speaker count via silhouette score when n_speakers is None.
+"""
 import logging
 import time
 from typing import List, Dict, Any, Optional
@@ -6,11 +9,11 @@ import numpy as np
 import soundfile as sf
 import torch
 
-# Pod cuDNN init is broken (CUDNN_STATUS_NOT_INITIALIZED on conv ops).
-# Disable cuDNN — falls back to native CUDA kernels (slower but works).
+# Disable cuDNN — Pod has cuDNN init issue
 torch.backends.cudnn.enabled = False
 
 from sklearn.cluster import AgglomerativeClustering
+from sklearn.metrics import silhouette_score
 from speechbrain.inference.speaker import EncoderClassifier
 
 from engine import config
@@ -32,12 +35,43 @@ def _load():
     )
 
 
+def _pick_best_k(X: np.ndarray, max_k: int = 5) -> int:
+    """Pick k in [2, min(max_k, n-1)] with highest silhouette score on cosine.
+
+    Falls back to 1 if there are too few embeddings to cluster.
+    """
+    n = len(X)
+    if n < 2:
+        return 1
+    upper = min(max_k, n - 1)
+    if upper < 2:
+        return 1
+    best_k, best_score = 2, -1.0
+    for k in range(2, upper + 1):
+        try:
+            labels = AgglomerativeClustering(
+                n_clusters=k, metric="cosine", linkage="average"
+            ).fit_predict(X)
+            # Need at least 2 distinct labels to score
+            if len(set(labels)) < 2:
+                continue
+            score = silhouette_score(X, labels, metric="cosine")
+            if score > best_score:
+                best_k, best_score = k, score
+        except Exception as e:
+            logger.warning(f"Silhouette eval failed at k={k}: {e}")
+    return best_k
+
+
 def diarize_ecapa(
     audio_path: str,
     segments: List[Dict[str, Any]],
-    n_speakers: int = 2,
+    n_speakers: Optional[int] = None,
 ) -> Dict[str, Any]:
-    """ECAPA embeddings per segment + agglomerative clustering."""
+    """ECAPA embeddings per segment + agglomerative clustering.
+
+    If `n_speakers` is None, picks the best k via silhouette score (k in 2..5).
+    """
     _load()
     audio, sr = sf.read(audio_path)
     if audio.ndim > 1:
@@ -59,13 +93,22 @@ def diarize_ecapa(
 
     if len(embeddings) < 2:
         out = [{**s, "speaker": "SPEAKER_0"} for s in segments]
-        return {"segments": out, "elapsed_sec": round(time.time() - t0, 2)}
+        return {
+            "segments": out,
+            "speakers_detected": 1,
+            "elapsed_sec": round(time.time() - t0, 2),
+        }
 
-    n_clusters = min(n_speakers, len(embeddings))
     X = np.stack(embeddings)
-    labels = AgglomerativeClustering(
-        n_clusters=n_clusters, metric="cosine", linkage="average"
-    ).fit_predict(X)
+    n_clusters = n_speakers if n_speakers is not None else _pick_best_k(X, max_k=5)
+    n_clusters = max(1, min(n_clusters, len(embeddings)))
+
+    if n_clusters >= 2:
+        labels = AgglomerativeClustering(
+            n_clusters=n_clusters, metric="cosine", linkage="average"
+        ).fit_predict(X)
+    else:
+        labels = [0] * len(embeddings)
 
     out = [dict(s) for s in segments]
     last_label = 0
@@ -76,4 +119,8 @@ def diarize_ecapa(
             li += 1
         seg["speaker"] = f"SPEAKER_{last_label}"
 
-    return {"segments": out, "elapsed_sec": round(time.time() - t0, 2)}
+    return {
+        "segments": out,
+        "speakers_detected": int(n_clusters),
+        "elapsed_sec": round(time.time() - t0, 2),
+    }

@@ -29,6 +29,7 @@ class ProcessResponse(BaseModel):
     timings: Dict[str, float]
     cost: Dict[str, float]
     tools_used: Dict[str, str]
+    speakers_detected: Optional[int] = None
 
 
 class CloneRequest(BaseModel):

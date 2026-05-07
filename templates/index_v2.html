@@ -348,7 +348,7 @@
         <option value="nemo-canary">NeMo Canary (en/de/es/fr فقط)</option>
       </select>
     </label>
-    <label>Diarization:
+    <label>Diarization (تلقائي عدد المتحدثين):
       <select id="diarTool">
         <option value="ecapa-tdnn" selected>ECAPA-TDNN ✓</option>
         <option value="pyannote-3.1">pyannote 3.1 (يحتاج HF_TOKEN)</option>
@@ -356,14 +356,6 @@
     </label>
   </div>
   <div class="controls-row">
-    <label>عدد المتحدثين:
-      <select id="nSpeakers">
-        <option value="1">1</option>
-        <option value="2" selected>2</option>
-        <option value="3">3</option>
-        <option value="4">4</option>
-      </select>
-    </label>
     <button class="btn" id="processBtn" disabled>🚀 معالجة</button>
     <button class="btn btn-secondary" id="loadLongBtn" title="تحميل آخر مقطع طويل تمت معالجته من السكريبت process_long.py">📂 تحميل النتائج الطويلة</button>
     <span id="processStatus"></span>
@@ -585,6 +577,16 @@ processBtn.addEventListener('click', async () => {
     document.getElementById('processStatus').innerHTML =
       `✅ اكتمل (STT: ${sttSec.toFixed(1)}s · Diarization: ${diarSec.toFixed(1)}s)`;
     renderResults(data);
+
+    // Auto-detected speaker count banner
+    if (data.speakers_detected) {
+      const banner = document.createElement('div');
+      banner.className = 'alert alert-info';
+      banner.style.margin = '10px 0';
+      banner.innerHTML = `🎯 تم اكتشاف <b>${data.speakers_detected}</b> متحدث(ون) تلقائياً`;
+      const tp = document.getElementById('transcriptPanel');
+      tp.insertBefore(banner, tp.firstChild);
+    }
 
     // Log to session-wide comparison table
     const dur = data.duration || 0;

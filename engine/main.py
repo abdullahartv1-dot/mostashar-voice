@@ -134,6 +134,7 @@ def api_process(req: ProcessRequest, _=Depends(require_api_key)):
 
     # Diarization (skip if VibeVoice ASR — already provides speakers)
     diar_used = req.diar_tool
+    speakers_detected = None
     if req.stt_tool != "vibevoice-asr":
         if not req.diar_tool or req.diar_tool not in DIAR_HANDLERS:
             raise HTTPException(400, f"diar_tool required for stt {req.stt_tool}")
@@ -141,9 +142,12 @@ def api_process(req: ProcessRequest, _=Depends(require_api_key)):
         diar_result = DIAR_HANDLERS[req.diar_tool](audio_path, segments)
         timings["diar_sec"] = round(_time.time() - t0, 2)
         segments = diar_result["segments"]
+        speakers_detected = diar_result.get("speakers_detected")
     else:
         timings["diar_sec"] = 0.0
         diar_used = "built-in (vibevoice-asr)"
+        # Count distinct speakers from segments
+        speakers_detected = len(set(s.get("speaker", "SPEAKER_0") for s in segments))
 
     # Sample extraction
     t0 = _time.time()
@@ -183,6 +187,7 @@ def api_process(req: ProcessRequest, _=Depends(require_api_key)):
         timings=timings,
         cost=cost,
         tools_used={"stt": req.stt_tool, "diar": diar_used},
+        speakers_detected=speakers_detected,
     )
 
 
