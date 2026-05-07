@@ -23,3 +23,15 @@ def test_whisper_turbo_transcribes_arabic():
     result = transcribe_whisper(str(FIXTURE), model_size="large-v3-turbo")
     assert result["duration"] == pytest.approx(5.0, abs=0.5)
     assert len(result["segments"]) >= 1
+
+
+@pytest.mark.skipif(not FIXTURE.exists(), reason="fixture missing")
+def test_vibevoice_asr_transcribes_arabic():
+    from engine.services.stt_vibevoice import transcribe_vibevoice
+    result = transcribe_vibevoice(str(FIXTURE))
+    assert "segments" in result
+    # VibeVoice ASR returns segments with speakers
+    assert len(result["segments"]) >= 1
+    if result["segments"]:
+        seg = result["segments"][0]
+        assert "speaker" in seg or "speaker_id" in seg
