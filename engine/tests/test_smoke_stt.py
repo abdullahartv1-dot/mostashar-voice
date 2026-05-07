@@ -35,3 +35,11 @@ def test_vibevoice_asr_transcribes_arabic():
     if result["segments"]:
         seg = result["segments"][0]
         assert "speaker" in seg or "speaker_id" in seg
+
+
+@pytest.mark.skipif(not FIXTURE.exists(), reason="fixture missing")
+def test_nemo_canary_transcribes_arabic():
+    from engine.services.stt_nemo import transcribe_canary
+    result = transcribe_canary(str(FIXTURE))
+    assert result["duration"] == pytest.approx(5.0, abs=0.5)
+    assert len(result["segments"]) >= 1
