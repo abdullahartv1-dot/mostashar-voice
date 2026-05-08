@@ -1,0 +1,271 @@
+<!DOCTYPE html>
+<html lang="ar" dir="rtl">
+<head>
+<meta charset="UTF-8">
+<title>📊 جلسة {{ job.id }} — Voice Studio v2</title>
+<style>
+  * { box-sizing: border-box; margin: 0; padding: 0; }
+  body {
+    font-family: 'Segoe UI', Tahoma, sans-serif;
+    background: linear-gradient(135deg, #0f1419 0%, #1a2332 100%);
+    color: #e7e9ea;
+    min-height: 100vh;
+    padding: 20px;
+  }
+  .container { max-width: 1300px; margin: 0 auto; }
+  header { text-align: center; padding: 20px 0; border-bottom: 1px solid #2f3336; margin-bottom: 25px; }
+  header h1 { color: #1d9bf0; font-size: 1.6em; margin-bottom: 6px; }
+  header .id { color: #8899a6; font-family: monospace; direction: ltr; display: inline-block; }
+  .nav { text-align: center; margin: 15px 0; }
+  .nav a {
+    color: #1d9bf0;
+    text-decoration: none;
+    padding: 8px 16px;
+    border: 1px solid #2f3336;
+    border-radius: 20px;
+    margin: 0 5px;
+    font-size: 0.9em;
+  }
+  .nav a:hover { background: #1c2732; }
+
+  .panel {
+    background: #16202a;
+    border: 1px solid #2f3336;
+    border-radius: 14px;
+    margin-bottom: 25px;
+    overflow: hidden;
+  }
+  .panel h2 {
+    background: linear-gradient(90deg, #1d9bf0, #1a8cd8);
+    color: white;
+    padding: 14px 20px;
+    font-size: 1.1em;
+  }
+  .panel.clones h2 { background: linear-gradient(90deg, #7856ff, #5a3ec9); }
+  .panel.audio h2 { background: linear-gradient(90deg, #00ba7c, #008a5c); }
+  .panel-body { padding: 18px 22px; }
+
+  .stats {
+    display: grid;
+    grid-template-columns: repeat(auto-fit, minmax(150px, 1fr));
+    gap: 12px;
+    margin-bottom: 16px;
+  }
+  .stat { background: #0f1419; padding: 10px 14px; border-radius: 8px; text-align: center; }
+  .stat .v { font-size: 1.2em; font-weight: bold; color: #1d9bf0; direction: ltr; display: inline-block; }
+  .stat .v.cost { color: #f4b942; }
+  .stat .l { color: #8899a6; font-size: 0.85em; margin-top: 3px; }
+
+  audio { width: 100%; }
+
+  .speakers-grid {
+    display: grid;
+    grid-template-columns: repeat(auto-fit, minmax(280px, 1fr));
+    gap: 14px;
+  }
+  .speaker-card {
+    background: #0f1419;
+    border-right: 4px solid #f4b942;
+    border-radius: 10px;
+    padding: 12px 16px;
+  }
+  .speaker-card h3 { color: #f4b942; margin-bottom: 6px; font-size: 1em; }
+  .speaker-card .dur { color: #8899a6; font-size: 0.85em; margin-bottom: 6px; }
+
+  .transcript {
+    max-height: 400px;
+    overflow-y: auto;
+  }
+  .transcript .seg {
+    padding: 8px 12px;
+    margin-bottom: 6px;
+    background: #0f1419;
+    border-radius: 8px;
+    border-right: 3px solid #2f3336;
+    display: flex;
+    gap: 10px;
+    align-items: flex-start;
+  }
+  .transcript .time { color: #586470; font-size: 0.8em; min-width: 70px; font-family: monospace; direction: ltr; }
+  .transcript .spk {
+    background: #f4b942;
+    color: black;
+    font-size: 0.75em;
+    padding: 2px 8px;
+    border-radius: 8px;
+    height: fit-content;
+    font-weight: bold;
+  }
+  .transcript .spk.s1 { background: #f91880; color: white; }
+  .transcript .spk.s2 { background: #7856ff; color: white; }
+  .transcript .spk.s3 { background: #00ba7c; color: white; }
+
+  .clone-grid {
+    display: grid;
+    grid-template-columns: repeat(auto-fit, minmax(380px, 1fr));
+    gap: 14px;
+  }
+  .clone-card {
+    background: #0f1419;
+    border: 1px solid #2f3336;
+    border-radius: 10px;
+    padding: 14px 16px;
+  }
+  .clone-card .head {
+    display: flex;
+    justify-content: space-between;
+    align-items: center;
+    flex-wrap: wrap;
+    gap: 6px;
+    margin-bottom: 10px;
+  }
+  .clone-card .tool { color: #1d9bf0; font-weight: bold; font-size: 1.05em; }
+  .badges { display: flex; gap: 6px; flex-wrap: wrap; }
+  .badge { background: #2f3336; color: #8899a6; padding: 3px 8px; border-radius: 8px; font-size: 0.78em; direction: ltr; }
+  .badge.cost { color: #f4b942; }
+  .badge.spk { background: #f4b94240; color: #f4b942; }
+  .clone-text {
+    background: #16202a;
+    padding: 10px 14px;
+    border-radius: 8px;
+    font-size: 0.95em;
+    margin-bottom: 8px;
+    border-right: 3px solid #7856ff;
+  }
+  .empty { color: #8899a6; text-align: center; padding: 30px; }
+</style>
+</head>
+<body>
+<div class="container">
+
+<header>
+  <h1>📊 جلسة المقارنة</h1>
+  <div class="id">🆔 {{ job.id }}</div>
+</header>
+
+<div class="nav">
+  <a href="/v2">🏠 Voice Studio</a>
+  <a href="/v2/compare">📊 كل الجلسات</a>
+</div>
+
+<!-- 1. Process info -->
+<div class="panel">
+  <h2>ℹ️ معلومات الجلسة</h2>
+  <div class="panel-body">
+    <div class="stats">
+      <div class="stat">
+        <div class="v">⏱ {{ "%.1f"|format(job.duration or 0) }}s</div>
+        <div class="l">مدة الصوت</div>
+      </div>
+      <div class="stat">
+        <div class="v">{{ job.segments|length if job.segments else 0 }}</div>
+        <div class="l">عدد المقاطع</div>
+      </div>
+      <div class="stat">
+        <div class="v">{{ job.speakers_detected if job.speakers_detected else (job.samples|length if job.samples else 0) }}</div>
+        <div class="l">المتحدثون</div>
+      </div>
+      {% if job.cost and job.cost.total_usd is defined %}
+      <div class="stat">
+        <div class="v cost">${{ "%.4f"|format(job.cost.total_usd or 0) }}</div>
+        <div class="l">تكلفة المعالجة</div>
+      </div>
+      {% endif %}
+      {% if job.tools_used and job.tools_used.stt %}
+      <div class="stat">
+        <div class="v" style="font-size:0.9em">{{ job.tools_used.stt }}</div>
+        <div class="l">STT</div>
+      </div>
+      {% endif %}
+      {% if job.tools_used and job.tools_used.diar %}
+      <div class="stat">
+        <div class="v" style="font-size:0.9em">{{ job.tools_used.diar }}</div>
+        <div class="l">Diarization</div>
+      </div>
+      {% endif %}
+    </div>
+  </div>
+</div>
+
+<!-- 2. Original audio player -->
+<div class="panel audio">
+  <h2>🎵 الصوت الأصلي</h2>
+  <div class="panel-body">
+    <audio controls preload="none" src="/v2/files/{{ job.id }}/audio_16k.wav"></audio>
+  </div>
+</div>
+
+<!-- 3. Speaker samples -->
+{% if job.samples %}
+<div class="panel">
+  <h2>👥 عينات المتحدثين</h2>
+  <div class="panel-body">
+    <div class="speakers-grid">
+      {% for sp, info in job.samples.items() %}
+      <div class="speaker-card">
+        <h3>{{ sp }}</h3>
+        <div class="dur">{{ "%.1f"|format(info.duration or 0) }} ثانية</div>
+        <audio controls preload="none" src="/v2{{ info.url }}"></audio>
+      </div>
+      {% endfor %}
+    </div>
+  </div>
+</div>
+{% endif %}
+
+<!-- 4. Transcript -->
+{% if job.segments %}
+<div class="panel">
+  <h2>📝 النص المُفرَّغ</h2>
+  <div class="panel-body">
+    <div class="transcript">
+      {% for seg in job.segments %}
+      <div class="seg">
+        <span class="time">{{ "%.2f"|format(seg.start) }}s → {{ "%.2f"|format(seg.end) }}s</span>
+        {% if seg.speaker %}
+          {% set sp_idx = seg.speaker.replace('SPEAKER_', '') %}
+          <span class="spk s{{ sp_idx }}">{{ seg.speaker }}</span>
+        {% endif %}
+        <span style="flex:1">{{ seg.text }}</span>
+      </div>
+      {% endfor %}
+    </div>
+  </div>
+</div>
+{% endif %}
+
+<!-- 5. Clones -->
+<div class="panel clones">
+  <h2>🎤 الاستنساخات ({{ job.clones|length if job.clones else 0 }})</h2>
+  <div class="panel-body">
+    {% if job.clones %}
+    <div class="clone-grid">
+      {% for c in job.clones %}
+      <div class="clone-card">
+        <div class="head">
+          <div class="tool">{{ c.tool }}</div>
+          <div class="badges">
+            <span class="badge spk">👤 {{ c.speaker_id }}</span>
+            <span class="badge">⏱ {{ "%.1f"|format(c.elapsed) }}s</span>
+            <span class="badge">🎵 {{ "%.1f"|format(c.duration) }}s</span>
+            {% if c.rtf %}<span class="badge">RTF {{ "%.2f"|format(c.rtf) }}x</span>{% endif %}
+            <span class="badge cost">💰 ${{ "%.4f"|format(c.cost_usd) }}</span>
+          </div>
+        </div>
+        <div class="clone-text">{{ c.text }}</div>
+        <audio controls preload="none" src="/v2{{ c.audio_url }}"></audio>
+      </div>
+      {% endfor %}
+    </div>
+    {% else %}
+    <div class="empty">
+      لم يتم إنشاء أي استنساخ صوتي لهذه الجلسة بعد.<br>
+      ارجع لـ <a href="/v2" style="color:#1d9bf0">Voice Studio</a> واستخدم نفس الـ job لتوليد صوت.
+    </div>
+    {% endif %}
+  </div>
+</div>
+
+</div>
+</body>
+</html>

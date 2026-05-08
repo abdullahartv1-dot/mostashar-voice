@@ -1,0 +1,106 @@
+<!DOCTYPE html>
+<html lang="ar" dir="rtl">
+<head>
+<meta charset="UTF-8">
+<title>📊 سجل الجلسات — Voice Studio v2</title>
+<style>
+  * { box-sizing: border-box; margin: 0; padding: 0; }
+  body {
+    font-family: 'Segoe UI', Tahoma, sans-serif;
+    background: linear-gradient(135deg, #0f1419 0%, #1a2332 100%);
+    color: #e7e9ea;
+    min-height: 100vh;
+    padding: 20px;
+  }
+  .container { max-width: 1100px; margin: 0 auto; }
+  header { text-align: center; padding: 20px 0; border-bottom: 1px solid #2f3336; margin-bottom: 25px; }
+  header h1 { color: #1d9bf0; font-size: 1.8em; }
+  .nav { text-align: center; margin: 15px 0; }
+  .nav a {
+    color: #1d9bf0;
+    text-decoration: none;
+    padding: 8px 16px;
+    border: 1px solid #2f3336;
+    border-radius: 20px;
+    margin: 0 5px;
+  }
+  .nav a:hover { background: #1c2732; }
+  .job {
+    background: #16202a;
+    border: 1px solid #2f3336;
+    border-radius: 12px;
+    padding: 18px 22px;
+    margin-bottom: 12px;
+    display: flex;
+    justify-content: space-between;
+    align-items: center;
+    flex-wrap: wrap;
+    gap: 12px;
+    transition: all 0.2s;
+  }
+  .job:hover { border-color: #1d9bf0; }
+  .job h3 { color: #1d9bf0; font-size: 1em; margin-bottom: 6px; direction: ltr; display: inline-block; font-family: monospace; }
+  .job .meta { color: #8899a6; font-size: 0.9em; margin-top: 4px; }
+  .stats { display: flex; gap: 14px; flex-wrap: wrap; }
+  .stat { background: #0f1419; padding: 6px 12px; border-radius: 8px; font-size: 0.9em; }
+  .stat .v { color: #1d9bf0; font-weight: bold; }
+  .stat.cost .v { color: #f4b942; direction: ltr; display: inline-block; }
+  .btn {
+    background: #1d9bf0;
+    color: white;
+    text-decoration: none;
+    padding: 10px 20px;
+    border-radius: 25px;
+    font-size: 0.9em;
+    font-weight: bold;
+  }
+  .empty { text-align: center; color: #8899a6; padding: 60px 20px; }
+  .empty code { color: #1d9bf0; }
+</style>
+</head>
+<body>
+<div class="container">
+
+<header>
+  <h1>📊 سجل الجلسات</h1>
+  <p style="color:#8899a6; margin-top: 6px;">كل جلسة تتضمن: ملف صوت أصلي + تفريغ + استنساخات</p>
+</header>
+
+<div class="nav">
+  <a href="/v2">🏠 Voice Studio</a>
+  <a href="/v2/compare">📊 السجل</a>
+</div>
+
+{% if jobs %}
+{% for j in jobs %}
+  <div class="job">
+    <div>
+      <h3>🆔 {{ j.id }}</h3>
+      <div class="meta">
+        {% if j.tools_used %}
+          📝 STT: <strong>{{ j.tools_used.stt }}</strong>
+          {% if j.tools_used.diar %} · 👥 Diar: <strong>{{ j.tools_used.diar }}</strong>{% endif %}
+        {% endif %}
+        {% if j.duration %} · ⏱ {{ "%.1f"|format(j.duration) }}s{% endif %}
+      </div>
+    </div>
+    <div class="stats">
+      {% set clones_count = j.clones|length if j.clones else 0 %}
+      <div class="stat">🎤 استنساخات: <span class="v">{{ clones_count }}</span></div>
+      {% if j.cost and j.cost.total_usd %}
+      <div class="stat cost">💰 <span class="v">${{ "%.4f"|format(j.cost.total_usd) }}</span></div>
+      {% endif %}
+    </div>
+    <a class="btn" href="/v2/compare/{{ j.id }}">عرض ←</a>
+  </div>
+{% endfor %}
+{% else %}
+  <div class="empty">
+    لا توجد جلسات محفوظة بعد.<br>
+    افتح <a href="/v2" style="color:#1d9bf0">Voice Studio</a> وارفع ملف صوت لإنشاء جلسة جديدة.
+  </div>
+{% endif %}
+
+</div>
+</body>
+</html>

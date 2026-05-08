@@ -256,6 +256,25 @@ def api_clone(req: CloneRequest, _=Depends(require_api_key)):
         shutil.move(str(out_path), str(final))
 
     cost = calc_cost(elapsed, config.GPU_RATE_PER_HOUR_USD)
+
+    # Record this clone in the job's history (persisted)
+    clone_entry = {
+        "tool": req.tts_tool,
+        "speaker_id": req.speaker_id,
+        "text": req.text,
+        "audio_url": f"/files/{req.job_id}/{final.name}",
+        "elapsed": round(elapsed, 2),
+        "duration": round(out_duration, 2),
+        "rtf": round(elapsed / out_duration, 2) if out_duration > 0 else 0,
+        "cost_usd": cost,
+        "diffusion_steps": req.diffusion_steps,
+        "cfg_scale": req.cfg_scale,
+        "ts": _time.time(),
+    }
+    clones = list(job.get("clones", []))
+    clones.append(clone_entry)
+    jobs_store.update_job(req.job_id, clones=clones)
+
     return CloneResponse(
         audio_url=f"/files/{req.job_id}/{final.name}",
         duration=round(out_duration, 2),

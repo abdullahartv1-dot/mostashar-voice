@@ -477,5 +477,30 @@ def v2_files(subpath):
     return r.content, 200, {"Content-Type": r.headers.get("Content-Type", "application/octet-stream")}
 
 
+@app.route('/v2/compare')
+def v2_compare():
+    """Comparison results viewer — list all jobs persisted on Pod."""
+    try:
+        r = _httpx.get(f"{POD_API}/api/jobs", headers=_pod_headers, timeout=10)
+        jobs = r.json() if r.status_code == 200 else []
+    except Exception:
+        jobs = []
+    # Sort by reverse (newest first) - jobs don't carry timestamps but the order from Pod is fine
+    return render_template('compare_list.html', jobs=jobs)
+
+
+@app.route('/v2/compare/<job_id>')
+def v2_compare_detail(job_id):
+    """Show full session detail: audio + transcript + speakers + clones."""
+    try:
+        r = _httpx.get(f"{POD_API}/api/jobs/{job_id}", headers=_pod_headers, timeout=10)
+        if r.status_code != 200:
+            return f"Job not found: {job_id}", 404
+        job = r.json()
+    except Exception as e:
+        return f"Error fetching job: {e}", 500
+    return render_template('compare_detail.html', job=job)
+
+
 if __name__ == '__main__':
     app.run(debug=False, port=5000, host='127.0.0.1')
