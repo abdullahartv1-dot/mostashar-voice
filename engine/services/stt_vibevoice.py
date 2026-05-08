@@ -1,6 +1,16 @@
-"""VibeVoice ASR — combined STT + speaker diarization in one model."""
+"""VibeVoice ASR — combined STT + speaker diarization in one model.
+
+KNOWN LIMITATION: This model needs 8 safetensor shards (~5GB) plus Qwen-7B (~15GB)
+that get downloaded from HuggingFace at first call. The Pod's HF CDN connections
+get throttled/dropped mid-download, leaving partial files that fill the disk
+quota without ever yielding a usable model. Until that's fixed (e.g., by
+pre-downloading via a separate one-shot install script + verifying all 8 shards
+exist), this handler refuses to start the download.
+"""
 import logging
+import os
 import time
+from pathlib import Path
 from typing import Dict, Any, Optional
 import torch
 from vibevoice.modular.modeling_vibevoice_asr import VibeVoiceASRForConditionalGeneration
@@ -12,10 +22,35 @@ _model: Optional[VibeVoiceASRForConditionalGeneration] = None
 _processor: Optional[VibeVoiceASRProcessor] = None
 
 
+def _check_complete_cache() -> Optional[str]:
+    """Return error string if VibeVoice ASR shards aren't all locally cached."""
+    hf_home = os.environ.get("HF_HOME", "/workspace/hf-cache")
+    snap_root = Path(hf_home) / "hub" / "models--microsoft--VibeVoice-ASR-HF" / "snapshots"
+    if not snap_root.exists():
+        return f"VibeVoice-ASR cache not found at {snap_root}"
+    snaps = list(snap_root.iterdir())
+    if not snaps:
+        return f"No snapshots in {snap_root}"
+    # All 8 shards must be present
+    snap = snaps[0]
+    needed = [f"model-0000{i}-of-00008.safetensors" for i in range(1, 9)]
+    missing = [n for n in needed if not (snap / n).exists()]
+    if missing:
+        return (
+            f"VibeVoice-ASR is incomplete in cache (missing {len(missing)}/8 shards: "
+            f"{missing[0]}…). Re-run the one-shot install script to download all "
+            f"shards before retrying. Skipping to avoid filling disk quota."
+        )
+    return None
+
+
 def _load() -> None:
     global _model, _processor
     if _model is not None:
         return
+    err = _check_complete_cache()
+    if err:
+        raise RuntimeError(err)
     logger.info("Loading VibeVoice ASR-HF (~5GB model + Qwen 7B = ~20GB VRAM)…")
     _processor = VibeVoiceASRProcessor.from_pretrained(
         "microsoft/VibeVoice-ASR-HF",

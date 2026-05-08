@@ -1,0 +1,46 @@
+{
+  "audio_file": "C:\\Users\\Admin\\Downloads\\01.mp3",
+  "audio_size_mb": 0.81,
+  "test_text": "مرحباً بكم في تجربة استنساخ الصوت العربي. هذا الصوت تم توليده بالكامل.",
+  "rate_per_hour": 0.27,
+  "stt_runs": [
+    {
+      "tool": "whisper-large-v3",
+      "status": "FAIL",
+      "wall_sec": 10.75,
+      "http_status": 500,
+      "error": "Internal Server Error"
+    },
+    {
+      "tool": "whisper-turbo",
+      "status": "FAIL",
+      "wall_sec": 1.67,
+      "http_status": 500,
+      "error": "Internal Server Error"
+    },
+    {
+      "tool": "nemo-canary",
+      "status": "FAIL",
+      "wall_sec": 6.5,
+      "http_status": 500,
+      "error": "Internal Server Error"
+    },
+    {
+      "tool": "vibevoice-asr",
+      "status": "FAIL",
+      "wall_sec": 2.46,
+      "http_status": 500,
+      "error": "Internal Server Error"
+    }
+  ],
+  "tts_runs": [],
+  "started_at": 1778197528.393706,
+  "upload": {
+    "job_id": "8f800b2d",
+    "audio_path": "/workspace/voice-studio-v2/jobs/8f800b2d/audio_16k.wav",
+    "duration": 21.24,
+    "size_bytes": 849823
+  },
+  "finished_at": 1778197550.2716615,
+  "total_session_cost_usd": 0
+}

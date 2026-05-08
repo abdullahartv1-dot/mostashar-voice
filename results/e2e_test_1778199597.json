@@ -1,0 +1,148 @@
+{
+  "audio_file": "C:\\Users\\Admin\\Downloads\\01.mp3",
+  "audio_size_mb": 0.81,
+  "test_text": "مرحباً بكم في تجربة استنساخ الصوت العربي. هذا الصوت تم توليده بالكامل.",
+  "rate_per_hour": 0.27,
+  "stt_runs": [
+    {
+      "tool": "whisper-large-v3",
+      "status": "PASS",
+      "wall_sec": 11.86,
+      "engine_timings": {
+        "stt_sec": 7.27,
+        "diar_sec": 4.26,
+        "extract_sec": 0.07
+      },
+      "cost": {
+        "stt_usd": 0.0005,
+        "diar_usd": 0.0003,
+        "extract_usd": 0.0,
+        "total_usd": 0.0008
+      },
+      "speakers_detected": 2,
+      "n_segments": 13,
+      "first_3_segments": [
+        {
+          "start": 0.0,
+          "end": 2.96,
+          "text": "كنت مليونير وأنا عمري 26 سنة",
+          "speaker": "SPEAKER_0"
+        },
+        {
+          "start": 2.96,
+          "end": 3.76,
+          "text": "26 سنة؟",
+          "speaker": "SPEAKER_1"
+        },
+        {
+          "start": 3.76,
+          "end": 4.08,
+          "text": "أي نعم",
+          "speaker": "SPEAKER_1"
+        }
+      ],
+      "job_id": "f452a198"
+    },
+    {
+      "tool": "whisper-turbo",
+      "status": "PASS",
+      "wall_sec": 3.36,
+      "engine_timings": {
+        "stt_sec": 2.71,
+        "diar_sec": 0.36,
+        "extract_sec": 0.08
+      },
+      "cost": {
+        "stt_usd": 0.0002,
+        "diar_usd": 0.0,
+        "extract_usd": 0.0,
+        "total_usd": 0.0002
+      },
+      "speakers_detected": 2,
+      "n_segments": 13,
+      "first_3_segments": [
+        {
+          "start": 0.0,
+          "end": 2.92,
+          "text": "كنت مليونير وأنا عمري 26 سنة",
+          "speaker": "SPEAKER_0"
+        },
+        {
+          "start": 2.92,
+          "end": 3.76,
+          "text": "26 سنة؟",
+          "speaker": "SPEAKER_1"
+        },
+        {
+          "start": 3.76,
+          "end": 4.24,
+          "text": "أي نعم",
+          "speaker": "SPEAKER_1"
+        }
+      ],
+      "job_id": "f452a198"
+    },
+    {
+      "tool": "nemo-canary",
+      "status": "FAIL",
+      "wall_sec": 40.67,
+      "http_status": 500,
+      "error": "{\"detail\":\"STT nemo-canary failed: OSError: [Errno 122] Disk quota exceeded\"}"
+    },
+    {
+      "tool": "vibevoice-asr",
+      "status": "FAIL",
+      "wall_sec": 0.76,
+      "http_status": 500,
+      "error": "{\"detail\":\"STT vibevoice-asr failed: RuntimeError: VibeVoice-ASR is incomplete in cache (missing 7/8 shards: model-00001-of-00008.safetensors…). Re-run the one-shot install script to download all shards before retrying. Skipping to avoid filling disk quota.\"}"
+    }
+  ],
+  "tts_runs": [
+    {
+      "tool": "vibevoice-1.5b",
+      "status": "PASS",
+      "wall_sec": 14.75,
+      "elapsed": 14.54,
+      "output_duration": 8.4,
+      "rtf": 1.73,
+      "cost_usd": 0.0011,
+      "audio_url": "/files/f452a198/clone_1778199567.wav"
+    },
+    {
+      "tool": "f5-tts",
+      "status": "PASS",
+      "wall_sec": 9.2,
+      "elapsed": 8.99,
+      "output_duration": 5.15,
+      "rtf": 1.75,
+      "cost_usd": 0.0007,
+      "audio_url": "/files/f452a198/clone_1778199577.wav"
+    },
+    {
+      "tool": "xtts-v2",
+      "status": "PASS",
+      "wall_sec": 19.83,
+      "elapsed": 19.62,
+      "output_duration": 7.65,
+      "rtf": 2.56,
+      "cost_usd": 0.0015,
+      "audio_url": "/files/f452a198/clone_1778199596.wav"
+    },
+    {
+      "tool": "vibevoice-large",
+      "status": "FAIL",
+      "wall_sec": 0.24,
+      "http_status": 500,
+      "error": "{\"detail\":\"TTS vibevoice-large failed: RuntimeError: VibeVoice-Large is disabled on this Pod (8GB/10 shards trigger HF CDN throttling and never complete; partial downloads fill disk quota). Use vibevoice-1.5b instead.\"}"
+    }
+  ],
+  "started_at": 1778199496.0017858,
+  "upload": {
+    "job_id": "f452a198",
+    "audio_path": "/workspace/voice-studio-v2/jobs/f452a198/audio_16k.wav",
+    "duration": 21.24,
+    "size_bytes": 849823
+  },
+  "finished_at": 1778199597.1609943,
+  "total_session_cost_usd": 0.0043
+}

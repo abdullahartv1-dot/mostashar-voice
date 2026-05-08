@@ -56,6 +56,16 @@ def _ensure_node(model: str = "VibeVoice-1.5B") -> object:
     if _node is not None and _loaded_model == model:
         return _node
 
+    # VibeVoice-Large is intentionally not allowed: ~8GB / 10 shards that triggers
+    # HF CDN throttling on this Pod and never finishes — leaves partial files.
+    # 1.5B works because shards are smaller and pre-cached.
+    if model == "VibeVoice-Large":
+        raise RuntimeError(
+            "VibeVoice-Large is disabled on this Pod (8GB/10 shards trigger HF CDN "
+            "throttling and never complete; partial downloads fill disk quota). "
+            "Use vibevoice-1.5b instead."
+        )
+
     from nodes.single_speaker_node import VibeVoiceSingleSpeakerNode
     _node = VibeVoiceSingleSpeakerNode()
     model_paths = {

@@ -128,7 +128,13 @@ def api_process(req: ProcessRequest, _=Depends(require_api_key)):
 
     # STT
     t0 = _time.time()
-    stt_result = STT_HANDLERS[req.stt_tool](audio_path)
+    try:
+        stt_result = STT_HANDLERS[req.stt_tool](audio_path)
+    except Exception as e:
+        import traceback
+        tb = traceback.format_exc()
+        logger.error(f"STT handler {req.stt_tool} failed: {e}\n{tb}")
+        raise HTTPException(500, f"STT {req.stt_tool} failed: {type(e).__name__}: {e}")
     timings["stt_sec"] = round(_time.time() - t0, 2)
     segments = stt_result["segments"]
 
@@ -139,7 +145,13 @@ def api_process(req: ProcessRequest, _=Depends(require_api_key)):
         if not req.diar_tool or req.diar_tool not in DIAR_HANDLERS:
             raise HTTPException(400, f"diar_tool required for stt {req.stt_tool}")
         t0 = _time.time()
-        diar_result = DIAR_HANDLERS[req.diar_tool](audio_path, segments)
+        try:
+            diar_result = DIAR_HANDLERS[req.diar_tool](audio_path, segments)
+        except Exception as e:
+            import traceback
+            tb = traceback.format_exc()
+            logger.error(f"Diar handler {req.diar_tool} failed: {e}\n{tb}")
+            raise HTTPException(500, f"Diar {req.diar_tool} failed: {type(e).__name__}: {e}")
         timings["diar_sec"] = round(_time.time() - t0, 2)
         segments = diar_result["segments"]
         speakers_detected = diar_result.get("speakers_detected")
@@ -174,10 +186,7 @@ def api_process(req: ProcessRequest, _=Depends(require_api_key)):
         "tools_used": {"stt": req.stt_tool, "diar": diar_used},
         "duration": duration,
     }
-    if jobs_store.get_job(job_id):
-        jobs_store.update_job(job_id, **job_data)
-    else:
-        jobs_store._JOBS.update({job_id: job_data})
+    jobs_store.save_job(job_id, job_data)
 
     return ProcessResponse(
         job_id=job_id,
@@ -216,19 +225,25 @@ def api_clone(req: CloneRequest, _=Depends(require_api_key)):
 
     t0 = _time.time()
     handler = TTS_HANDLERS[req.tts_tool]
-    if req.tts_tool.startswith("vibevoice"):
-        out_path_str = handler(
-            text=req.text,
-            ref=str(sample_path),
-            diffusion_steps=req.diffusion_steps,
-            cfg_scale=req.cfg_scale,
-            seed=req.seed,
-        )
-    else:
-        out_path_str = handler(
-            text=req.text,
-            ref=str(sample_path),
-        )
+    try:
+        if req.tts_tool.startswith("vibevoice"):
+            out_path_str = handler(
+                text=req.text,
+                ref=str(sample_path),
+                diffusion_steps=req.diffusion_steps,
+                cfg_scale=req.cfg_scale,
+                seed=req.seed,
+            )
+        else:
+            out_path_str = handler(
+                text=req.text,
+                ref=str(sample_path),
+            )
+    except Exception as e:
+        import traceback
+        tb = traceback.format_exc()
+        logger.error(f"TTS handler {req.tts_tool} failed: {e}\n{tb}")
+        raise HTTPException(500, f"TTS {req.tts_tool} failed: {type(e).__name__}: {e}")
     elapsed = _time.time() - t0
 
     out_path = Path(out_path_str)

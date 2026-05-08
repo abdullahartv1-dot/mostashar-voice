@@ -1,0 +1,148 @@
+{
+  "audio_file": "C:\\Users\\Admin\\Downloads\\01.mp3",
+  "audio_size_mb": 0.81,
+  "test_text": "مرحباً بكم في تجربة استنساخ الصوت العربي. هذا الصوت تم توليده بالكامل.",
+  "rate_per_hour": 0.27,
+  "stt_runs": [
+    {
+      "tool": "whisper-large-v3",
+      "status": "PASS",
+      "wall_sec": 12.24,
+      "engine_timings": {
+        "stt_sec": 7.48,
+        "diar_sec": 4.45,
+        "extract_sec": 0.08
+      },
+      "cost": {
+        "stt_usd": 0.0006,
+        "diar_usd": 0.0003,
+        "extract_usd": 0.0,
+        "total_usd": 0.0009
+      },
+      "speakers_detected": 2,
+      "n_segments": 13,
+      "first_3_segments": [
+        {
+          "start": 0.0,
+          "end": 2.96,
+          "text": "كنت مليونير وأنا عمري 26 سنة",
+          "speaker": "SPEAKER_0"
+        },
+        {
+          "start": 2.96,
+          "end": 3.76,
+          "text": "26 سنة؟",
+          "speaker": "SPEAKER_1"
+        },
+        {
+          "start": 3.76,
+          "end": 4.08,
+          "text": "أي نعم",
+          "speaker": "SPEAKER_1"
+        }
+      ],
+      "job_id": "10f1202f"
+    },
+    {
+      "tool": "whisper-turbo",
+      "status": "PASS",
+      "wall_sec": 3.64,
+      "engine_timings": {
+        "stt_sec": 2.98,
+        "diar_sec": 0.36,
+        "extract_sec": 0.08
+      },
+      "cost": {
+        "stt_usd": 0.0002,
+        "diar_usd": 0.0,
+        "extract_usd": 0.0,
+        "total_usd": 0.0002
+      },
+      "speakers_detected": 2,
+      "n_segments": 13,
+      "first_3_segments": [
+        {
+          "start": 0.0,
+          "end": 2.92,
+          "text": "كنت مليونير وأنا عمري 26 سنة",
+          "speaker": "SPEAKER_0"
+        },
+        {
+          "start": 2.92,
+          "end": 3.76,
+          "text": "26 سنة؟",
+          "speaker": "SPEAKER_1"
+        },
+        {
+          "start": 3.76,
+          "end": 4.24,
+          "text": "أي نعم",
+          "speaker": "SPEAKER_1"
+        }
+      ],
+      "job_id": "10f1202f"
+    },
+    {
+      "tool": "nemo-canary",
+      "status": "FAIL",
+      "wall_sec": 42.52,
+      "http_status": 500,
+      "error": "{\"detail\":\"STT nemo-canary failed: OSError: [Errno 122] Disk quota exceeded\"}"
+    },
+    {
+      "tool": "vibevoice-asr",
+      "status": "FAIL",
+      "wall_sec": 0.69,
+      "http_status": 500,
+      "error": "{\"detail\":\"STT vibevoice-asr failed: RuntimeError: VibeVoice-ASR is incomplete in cache (missing 7/8 shards: model-00001-of-00008.safetensors…). Re-run the one-shot install script to download all shards before retrying. Skipping to avoid filling disk quota.\"}"
+    }
+  ],
+  "tts_runs": [
+    {
+      "tool": "vibevoice-1.5b",
+      "status": "PASS",
+      "wall_sec": 15.04,
+      "elapsed": 14.81,
+      "output_duration": 8.4,
+      "rtf": 1.76,
+      "cost_usd": 0.0011,
+      "audio_url": "/files/10f1202f/clone_1778199400.wav"
+    },
+    {
+      "tool": "f5-tts",
+      "status": "PASS",
+      "wall_sec": 14.63,
+      "elapsed": 14.42,
+      "output_duration": 5.15,
+      "rtf": 2.8,
+      "cost_usd": 0.0011,
+      "audio_url": "/files/10f1202f/clone_1778199415.wav"
+    },
+    {
+      "tool": "xtts-v2",
+      "status": "PASS",
+      "wall_sec": 20.98,
+      "elapsed": 20.77,
+      "output_duration": 7.65,
+      "rtf": 2.71,
+      "cost_usd": 0.0016,
+      "audio_url": "/files/10f1202f/clone_1778199436.wav"
+    },
+    {
+      "tool": "vibevoice-large",
+      "status": "FAIL",
+      "wall_sec": 12.34,
+      "http_status": 500,
+      "error": "{\"detail\":\"TTS vibevoice-large failed: Exception: Model loading failed: aoi-ot/VibeVoice-Large does not appear to have files named ('model-00001-of-00010.safetensors', 'model-00002-of-00010.safetensors', 'model-00003-of-00010.safetensors', 'model-00004-of-00010.safetensors', 'model-00005-of-00010.safetensors', 'model-00006-of-00010.safetensors', 'model-00007-of-00010.safetensors', 'model-00008-of-00010.safetensors', 'model-00009-of-00010.safetensors', 'model-00010-of-00010.safetensors'). Checkou"
+    }
+  ],
+  "started_at": 1778199326.2414587,
+  "upload": {
+    "job_id": "10f1202f",
+    "audio_path": "/workspace/voice-studio-v2/jobs/10f1202f/audio_16k.wav",
+    "duration": 21.24,
+    "size_bytes": 849823
+  },
+  "finished_at": 1778199448.8045063,
+  "total_session_cost_usd": 0.0049
+}

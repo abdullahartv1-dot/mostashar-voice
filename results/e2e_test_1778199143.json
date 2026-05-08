@@ -1,0 +1,45 @@
+{
+  "audio_file": "C:\\Users\\Admin\\Downloads\\01.mp3",
+  "audio_size_mb": 0.81,
+  "test_text": "مرحباً بكم في تجربة استنساخ الصوت العربي. هذا الصوت تم توليده بالكامل.",
+  "rate_per_hour": 0.27,
+  "stt_runs": [
+    {
+      "tool": "whisper-large-v3",
+      "status": "FAIL",
+      "wall_sec": 6.01,
+      "http_status": 500,
+      "error": "{\"detail\":\"STT whisper-large-v3 failed: OSError: I/O error: IO Error: Disk quota exceeded (os error 122)\"}"
+    },
+    {
+      "tool": "whisper-turbo",
+      "status": "FAIL",
+      "wall_sec": 7.94,
+      "http_status": 500,
+      "error": "Internal Server Error"
+    },
+    {
+      "tool": "nemo-canary",
+      "status": "FAIL",
+      "wall_sec": 4.89,
+      "http_status": 500,
+      "error": "{\"detail\":\"STT nemo-canary failed: OSError: [Errno 122] Disk quota exceeded\"}"
+    },
+    {
+      "tool": "vibevoice-asr",
+      "status": "ERROR",
+      "wall_sec": 60.18,
+      "error": "timed out"
+    }
+  ],
+  "tts_runs": [],
+  "started_at": 1778199063.8828197,
+  "upload": {
+    "job_id": "28ee840b",
+    "audio_path": "/workspace/voice-studio-v2/jobs/28ee840b/audio_16k.wav",
+    "duration": 21.24,
+    "size_bytes": 849823
+  },
+  "finished_at": 1778199143.4088728,
+  "total_session_cost_usd": 0
+}

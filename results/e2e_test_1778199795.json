@@ -1,0 +1,168 @@
+{
+  "audio_file": "C:\\Users\\Admin\\Downloads\\01.mp3",
+  "audio_size_mb": 0.81,
+  "test_text": "مرحباً بكم في تجربة استنساخ الصوت العربي. هذا الصوت تم توليده بالكامل.",
+  "rate_per_hour": 0.27,
+  "stt_runs": [
+    {
+      "tool": "whisper-large-v3",
+      "status": "PASS",
+      "wall_sec": 11.22,
+      "engine_timings": {
+        "stt_sec": 6.78,
+        "diar_sec": 4.1,
+        "extract_sec": 0.08
+      },
+      "cost": {
+        "stt_usd": 0.0005,
+        "diar_usd": 0.0003,
+        "extract_usd": 0.0,
+        "total_usd": 0.0008
+      },
+      "speakers_detected": 2,
+      "n_segments": 13,
+      "first_3_segments": [
+        {
+          "start": 0.0,
+          "end": 2.96,
+          "text": "كنت مليونير وأنا عمري 26 سنة",
+          "speaker": "SPEAKER_0"
+        },
+        {
+          "start": 2.96,
+          "end": 3.76,
+          "text": "26 سنة؟",
+          "speaker": "SPEAKER_1"
+        },
+        {
+          "start": 3.76,
+          "end": 4.08,
+          "text": "أي نعم",
+          "speaker": "SPEAKER_1"
+        }
+      ],
+      "job_id": "b3177529"
+    },
+    {
+      "tool": "whisper-turbo",
+      "status": "PASS",
+      "wall_sec": 3.52,
+      "engine_timings": {
+        "stt_sec": 2.77,
+        "diar_sec": 0.45,
+        "extract_sec": 0.07
+      },
+      "cost": {
+        "stt_usd": 0.0002,
+        "diar_usd": 0.0,
+        "extract_usd": 0.0,
+        "total_usd": 0.0002
+      },
+      "speakers_detected": 2,
+      "n_segments": 13,
+      "first_3_segments": [
+        {
+          "start": 0.0,
+          "end": 2.92,
+          "text": "كنت مليونير وأنا عمري 26 سنة",
+          "speaker": "SPEAKER_0"
+        },
+        {
+          "start": 2.92,
+          "end": 3.76,
+          "text": "26 سنة؟",
+          "speaker": "SPEAKER_1"
+        },
+        {
+          "start": 3.76,
+          "end": 4.24,
+          "text": "أي نعم",
+          "speaker": "SPEAKER_1"
+        }
+      ],
+      "job_id": "b3177529"
+    },
+    {
+      "tool": "nemo-canary",
+      "status": "PASS",
+      "wall_sec": 18.81,
+      "engine_timings": {
+        "stt_sec": 18.46,
+        "diar_sec": 0.05,
+        "extract_sec": 0.06
+      },
+      "cost": {
+        "stt_usd": 0.0014,
+        "diar_usd": 0.0,
+        "extract_usd": 0.0,
+        "total_usd": 0.0014
+      },
+      "speakers_detected": 1,
+      "n_segments": 1,
+      "first_3_segments": [
+        {
+          "start": 0.0,
+          "end": 21.24,
+          "text": " Kent millionaire.",
+          "speaker": "SPEAKER_0"
+        }
+      ],
+      "job_id": "b3177529"
+    },
+    {
+      "tool": "vibevoice-asr",
+      "status": "FAIL",
+      "wall_sec": 0.81,
+      "http_status": 500,
+      "error": "{\"detail\":\"STT vibevoice-asr failed: RuntimeError: VibeVoice-ASR is incomplete in cache (missing 7/8 shards: model-00001-of-00008.safetensors…). Re-run the one-shot install script to download all shards before retrying. Skipping to avoid filling disk quota.\"}"
+    }
+  ],
+  "tts_runs": [
+    {
+      "tool": "vibevoice-1.5b",
+      "status": "PASS",
+      "wall_sec": 13.96,
+      "elapsed": 13.73,
+      "output_duration": 6.8,
+      "rtf": 2.02,
+      "cost_usd": 0.001,
+      "audio_url": "/files/b3177529/clone_1778199763.wav"
+    },
+    {
+      "tool": "f5-tts",
+      "status": "PASS",
+      "wall_sec": 9.56,
+      "elapsed": 9.34,
+      "output_duration": 3.57,
+      "rtf": 2.61,
+      "cost_usd": 0.0007,
+      "audio_url": "/files/b3177529/clone_1778199773.wav"
+    },
+    {
+      "tool": "xtts-v2",
+      "status": "PASS",
+      "wall_sec": 22.24,
+      "elapsed": 22.02,
+      "output_duration": 8.16,
+      "rtf": 2.7,
+      "cost_usd": 0.0017,
+      "audio_url": "/files/b3177529/clone_1778199795.wav"
+    },
+    {
+      "tool": "vibevoice-large",
+      "status": "FAIL",
+      "wall_sec": 0.21,
+      "http_status": 500,
+      "error": "{\"detail\":\"TTS vibevoice-large failed: RuntimeError: VibeVoice-Large is disabled on this Pod (8GB/10 shards trigger HF CDN throttling and never complete; partial downloads fill disk quota). Use vibevoice-1.5b instead.\"}"
+    }
+  ],
+  "started_at": 1778199715.137831,
+  "upload": {
+    "job_id": "b3177529",
+    "audio_path": "/workspace/voice-studio-v2/jobs/b3177529/audio_16k.wav",
+    "duration": 21.24,
+    "size_bytes": 849823
+  },
+  "finished_at": 1778199795.9983027,
+  "total_session_cost_usd": 0.0058
+}

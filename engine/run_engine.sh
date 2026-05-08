@@ -10,9 +10,19 @@ sleep 1
 
 # Source env
 export VS_HOME=/workspace/voice-studio-v2
-export HF_HOME=$VS_HOME/.cache/huggingface
-export TMPDIR=$VS_HOME/tmp
-export GRADIO_TEMP_DIR=$VS_HOME/tmp
+# Reuse the pre-existing /workspace/hf-cache (10GB pre-downloaded models)
+# rather than re-downloading into VS_HOME/.cache. Falls back if the dir
+# doesn't exist.
+if [ -d /workspace/hf-cache ]; then
+  export HF_HOME=/workspace/hf-cache
+else
+  export HF_HOME=$VS_HOME/.cache/huggingface
+fi
+# /workspace has a tight quota that NeMo's tar-unpack of canary-1b.nemo
+# (~3GB) blows past. Use the container's /tmp (overlay fs, 10GB+ free).
+export TMPDIR=/tmp
+mkdir -p /tmp/vs2 || true
+export GRADIO_TEMP_DIR=/tmp/vs2
 export PYTHONUNBUFFERED=1
 
 # Double-fork to fully detach
