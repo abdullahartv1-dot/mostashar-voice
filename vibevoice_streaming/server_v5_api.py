@@ -152,6 +152,30 @@ class SessionLog:
         except Exception as e:
             print(f"[session-log] failed to record turn {idx}: {e}")
 
+    def update_turn_transcript(self, idx: int, transcript: str) -> None:
+        """Patch the transcript field of an already-recorded turn (used
+        when ASR runs in the background after the response was written)."""
+        try:
+            if not os.path.exists(self._log_path):
+                return
+            lines = []
+            with open(self._log_path, "r", encoding="utf-8") as f:
+                for line in f:
+                    try:
+                        row = json.loads(line)
+                    except Exception:
+                        lines.append(line)
+                        continue
+                    if row.get("turn") == idx:
+                        row["transcript"] = transcript
+                        lines.append(json.dumps(row, ensure_ascii=False) + "\n")
+                    else:
+                        lines.append(line)
+            with open(self._log_path, "w", encoding="utf-8") as f:
+                f.writelines(lines)
+        except Exception as e:
+            print(f"[session-log] failed to update turn {idx}: {e}")
+
 
 DEFAULT_SYSTEM_PROMPT = (
     "أنت مساعد صوتي ذكي لمنصة مستشار. مهمتك أن تجيب على المستخدم بنبرة "
@@ -1696,84 +1720,121 @@ async def conversation_ws(ws: WebSocket):
                     await ws.send_json({"type": "error", "message": "audio too short"})
                     continue
 
-                # Always run VibeVoice-ASR in PARALLEL with Gemma 4. Two
-                # different models on different memory regions of the same GPU
-                # ⇒ they overlap with no extra wall-clock cost, and we get
-                # back BOTH the real transcript (for the UI + chat history)
-                # AND Gemma's response in one round-trip. If Gemma 4 fails,
-                # the transcript is already in hand and we hand off to Qwen.
+                # FAST PATH: Gemma 4 owns the response. ASR runs in the
+                # BACKGROUND only for chat-bubble display + history record,
+                # and never blocks the audio reply.
+                #
+                # Why: VibeVoice-ASR and Gemma 4 share the same GPU. When
+                # we awaited both in parallel, ASR's ~1.3 s of compute
+                # added GPU contention that slowed Gemma 4 too — total
+                # turn latency hit ~3 s. Moving ASR off the critical
+                # path drops first-audio to ~0.7-1.0 s after EOU.
                 audio_f32_24k = librosa.resample(
                     audio_f32_16k, orig_sr=INPUT_SAMPLE_RATE,
                     target_sr=ASR_SAMPLE_RATE,
                 )
 
-                async def _run_asr():
-                    assert _asr_lock is not None
-                    # Cap to <60 s so we never hit the streaming code path
-                    # in the patched community fork (which crashes with
-                    # "unexpected keyword argument"). Keeps the LATEST
-                    # window so the user still sees what they just said.
+                # Save audio first (cheap, sync) so we can attach the
+                # transcript to it once ASR finishes.
+                turn_idx = session_log.next_turn_idx()
+                audio_path = session_log.save_audio(turn_idx, audio_f32_16k, INPUT_SAMPLE_RATE)
+
+                # Launch ASR in the background. It will post a transcript
+                # event when ready and update the session log + history.
+                async def _bg_asr_and_emit():
                     asr_audio = audio_f32_24k
                     if len(asr_audio) > ASR_MAX_AUDIO_SAMPLES:
                         asr_audio = asr_audio[-ASR_MAX_AUDIO_SAMPLES:]
                     try:
+                        assert _asr_lock is not None
                         async with _serialize(_asr_lock, _asr_stats):
                             loop = asyncio.get_event_loop()
-                            return await loop.run_in_executor(
+                            stt = await loop.run_in_executor(
                                 None, _asr_transcribe_sync, asr_audio
                             )
                     except Exception as e:
-                        # ASR is best-effort here — Gemma 4 carries the
-                        # actual response. Don't break the conversation.
-                        print(f"[asr] failed in conversation: {e}")
-                        return {"text": "", "segments": []}
-
-                async def _run_gemma():
-                    if not GEMMA4_URL:
-                        return None
+                        print(f"[asr-bg] failed: {e}")
+                        return
+                    raw_text = (stt.get("text") or "").strip()
+                    clean_text = _clean_asr_text_for_display(raw_text)
+                    if not clean_text:
+                        return
+                    # Surface to the UI (chat bubble) — the `late` flag
+                    # tells the client this transcript landed AFTER the
+                    # response, so it can insert/update accordingly.
                     try:
-                        return await _gemma4_audio_chat(audio_f32_16k, history)
+                        await ws.send_json({
+                            "type": "transcript",
+                            "text": clean_text,
+                            "turn": turn_idx,
+                            "late": True,
+                        })
+                    except Exception:
+                        pass
+                    # Patch the most recent user turn in history so the
+                    # NEXT turn's context is actual text, not "[audio]".
+                    for h in reversed(history):
+                        if h.get("role") == "user" and h.get("content") == "[audio]":
+                            h["content"] = clean_text
+                            break
+                    # Update session log row for this turn (rewrite line).
+                    session_log.update_turn_transcript(turn_idx, raw_text)
+
+                asyncio.create_task(_bg_asr_and_emit())
+
+                # Critical path: Gemma 4 audio → response → TTS.
+                gemma_response = None
+                if GEMMA4_URL:
+                    try:
+                        gemma_response = await _gemma4_audio_chat(audio_f32_16k, history)
                     except Exception as e:
                         print(f"[conversation] Gemma 4 failed: {e}")
-                        return None
-
-                # Save the audio to disk for recovery / replay.
-                turn_idx = session_log.next_turn_idx()
-                audio_path = session_log.save_audio(turn_idx, audio_f32_16k, INPUT_SAMPLE_RATE)
-
-                asr_task = asyncio.create_task(_run_asr())
-                gemma_task = asyncio.create_task(_run_gemma())
-                stt_result, gemma_response = await asyncio.gather(asr_task, gemma_task)
-
-                user_text_raw = (stt_result.get("text") or "").strip()
-                user_text = _clean_asr_text_for_display(user_text_raw)
-                # Show the CLEANED transcript in the UI — the [Silence] /
-                # [Unintelligible Speech] markers are internal ASR noise
-                # and confuse / clutter the chat bubble.
-                if user_text:
-                    await ws.send_json({"type": "transcript", "text": user_text})
-
-                if not user_text:
-                    # Couldn't make sense of the audio at all
-                    session_log.record_turn(turn_idx, audio_path, "", "")
-                    continue
 
                 if gemma_response and _looks_arabic(gemma_response):
-                    # Gemma succeeded — use its response, but store the REAL
-                    # transcript in history (so the next turn's context is
-                    # actual text, not a "[audio]" placeholder).
-                    session_log.record_turn(turn_idx, audio_path, user_text_raw, gemma_response)
+                    # Push placeholder user turn into history so the next
+                    # call has the dialog shape; the bg ASR task will
+                    # rewrite "[audio]" to the real transcript when it
+                    # finishes (usually still during this TTS playback).
+                    session_log.record_turn(turn_idx, audio_path, "", gemma_response)
                     await _conversation_turn_with_response(
-                        ws, voice_id, language, user_text, gemma_response,
+                        ws, voice_id, language, "[audio]", gemma_response,
                         history, interrupt_flag,
                     )
                 else:
-                    # Gemma failed or drifted — fall back to Qwen using the
-                    # already-computed transcript.
-                    response_text = await _conversation_turn(
-                        ws, voice_id, language, user_text, history, interrupt_flag,
-                    )
-                    session_log.record_turn(turn_idx, audio_path, user_text_raw, response_text or "")
+                    # Fallback: Gemma failed/drifted. We need a transcript
+                    # right now, so wait for the bg ASR (it's already
+                    # running) and hand to Qwen.
+                    print("[conversation] Gemma path failed — waiting for ASR")
+                    await asyncio.sleep(0)  # let bg task progress
+                    # Run a synchronous ASR retry to get text immediately.
+                    try:
+                        asr_audio = audio_f32_24k
+                        if len(asr_audio) > ASR_MAX_AUDIO_SAMPLES:
+                            asr_audio = asr_audio[-ASR_MAX_AUDIO_SAMPLES:]
+                        assert _asr_lock is not None
+                        async with _serialize(_asr_lock, _asr_stats):
+                            loop = asyncio.get_event_loop()
+                            stt = await loop.run_in_executor(
+                                None, _asr_transcribe_sync, asr_audio
+                            )
+                        user_text = _clean_asr_text_for_display(
+                            (stt.get("text") or "").strip()
+                        )
+                        if user_text:
+                            await ws.send_json({"type": "transcript", "text": user_text})
+                            response_text = await _conversation_turn(
+                                ws, voice_id, language, user_text,
+                                history, interrupt_flag,
+                            )
+                            session_log.record_turn(
+                                turn_idx, audio_path, user_text, response_text or ""
+                            )
+                    except Exception as e:
+                        print(f"[conversation] full fallback failed: {e}")
+                        await ws.send_json({
+                            "type": "error",
+                            "message": "تعذّر معالجة الصوت، حاول مرة أخرى.",
+                        })
     except WebSocketDisconnect:
         pass
     except Exception as e:
