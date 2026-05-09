@@ -87,6 +87,18 @@ from pydantic import BaseModel, Field
 MODEL_NAME = os.environ.get("MV_MODEL", "aoi-ot/VibeVoice-Large")
 ASR_MODEL_NAME = os.environ.get("MV_ASR_MODEL", "microsoft/VibeVoice-ASR")
 ASR_ENABLED = os.environ.get("MV_ASR_ENABLED", "1") not in ("0", "false", "False", "")
+# Whisper for the conversation path's long-audio transcription (>30s).
+# OpenAI's whisper-large-v3-turbo: 809M params, 8× faster than large-v3
+# with near-identical accuracy. Excellent Arabic + dialect coverage —
+# better than VibeVoice-ASR which is multilingual but less specialised.
+# Set MV_WHISPER_ENABLED=0 to disable (long-audio path will fall back
+# to VibeVoice-ASR). Memory cost: ~2 GB VRAM in fp16.
+WHISPER_MODEL_NAME = os.environ.get("MV_WHISPER_MODEL", "openai/whisper-large-v3-turbo")
+WHISPER_ENABLED = os.environ.get("MV_WHISPER_ENABLED", "1") not in ("0", "false", "False", "")
+# Default transcription language. "ar" forces Arabic decoding which
+# avoids Whisper's auto-detection occasionally guessing Persian/Urdu
+# on dialectal Arabic. Set "auto" to let it decide per call.
+WHISPER_LANGUAGE = os.environ.get("MV_WHISPER_LANGUAGE", "ar")
 LLM_MODEL_NAME = os.environ.get("MV_LLM_MODEL", "Qwen/Qwen2.5-7B-Instruct")
 LLM_ENABLED = os.environ.get("MV_LLM_ENABLED", "1") not in ("0", "false", "False", "")
 # Gemma 4 sidecar — direct audio→text chat, runs in its own venv on the
@@ -265,6 +277,8 @@ processor = None
 model = None
 asr_processor = None
 asr_model = None
+whisper_processor = None
+whisper_model = None
 llm_model = None
 llm_tokenizer = None
 voice_profiles: dict[str, dict] = {}
@@ -276,6 +290,7 @@ voice_profiles: dict[str, dict] = {}
 # in parallel: User A's TTS can stream while User B's ASR transcribes.
 _tts_lock: Optional["asyncio.Lock"] = None
 _asr_lock: Optional["asyncio.Lock"] = None
+_whisper_lock: Optional["asyncio.Lock"] = None
 _llm_lock: Optional["asyncio.Lock"] = None
 
 
@@ -304,6 +319,7 @@ class _ModelStats:
 
 _tts_stats = _ModelStats()
 _asr_stats = _ModelStats()
+_whisper_stats = _ModelStats()
 _llm_stats = _ModelStats()
 
 
@@ -428,6 +444,8 @@ class HealthResponse(BaseModel):
     version: str
     asr_loaded: bool = False
     asr_model: Optional[str] = None
+    whisper_loaded: bool = False
+    whisper_model: Optional[str] = None
     llm_loaded: bool = False
     llm_model: Optional[str] = None
     # Sidecars are optional dependencies; their absence degrades but
@@ -1084,6 +1102,110 @@ async def _asr_long_audio(audio_f32_24k: np.ndarray) -> str:
 
 
 # ============================================================
+# Whisper (openai/whisper-large-v3-turbo) — long-audio transcription
+# in the conversation endpoint, replaces VibeVoice-ASR for >30 s. Used
+# because Whisper has materially better Arabic + dialect coverage on
+# our test corpus (e.g. "حديثة" stays "حديثة", not "هذية").
+# ============================================================
+
+# Sliding-window params for `_whisper_long_audio`. Whisper's native cap
+# is 30 s per call; we use 28 s windows with 1 s of overlap so a word
+# split at a window boundary appears in BOTH windows and the merge
+# step can keep it intact. The trade-off is ~3 % extra compute.
+WHISPER_WINDOW_S = 28
+WHISPER_OVERLAP_S = 1
+
+
+def _whisper_transcribe_sync(audio_f32_16k: np.ndarray) -> str:
+    """Synchronous Whisper transcribe of a single ≤30 s 16 kHz mono clip.
+
+    Returns the cleaned text. Empty string on any failure (caller falls
+    back to VibeVoice-ASR if it gets nothing).
+    """
+    if whisper_processor is None or whisper_model is None:
+        return ""
+    if len(audio_f32_16k) < int(0.2 * INPUT_SAMPLE_RATE):
+        return ""
+    # Whisper's native input is 30 s — clamp defensively. The caller's
+    # windowing should have guaranteed this, but better safe.
+    audio = audio_f32_16k[: 30 * INPUT_SAMPLE_RATE]
+    inputs = whisper_processor(
+        audio, sampling_rate=INPUT_SAMPLE_RATE, return_tensors="pt",
+    )
+    # Whisper expects float16 features matching the model dtype.
+    feats = inputs.input_features.to("cuda", dtype=torch.float16)
+    gen_kwargs: dict = {
+        "max_new_tokens": 440,         # ~30 s of speech worst-case
+        "num_beams": 1,                # greedy for speed; quality stays high
+        "do_sample": False,
+        "no_repeat_ngram_size": 3,     # cuts the rare repetition loop
+    }
+    if WHISPER_LANGUAGE and WHISPER_LANGUAGE.lower() != "auto":
+        # Force language → no auto-detect mistakes. Saudi/Egyptian/
+        # Lebanese all decode under "ar" without dialect-specific tags.
+        gen_kwargs["language"] = WHISPER_LANGUAGE
+        gen_kwargs["task"] = "transcribe"
+    with torch.no_grad():
+        gen_ids = whisper_model.generate(feats, **gen_kwargs)
+    text = whisper_processor.batch_decode(gen_ids, skip_special_tokens=True)[0]
+    return text.strip()
+
+
+async def _whisper_long_audio(audio_f32_16k: np.ndarray) -> str:
+    """Transcribe arbitrarily-long 16 kHz mono audio via Whisper.
+
+    Splits into 28 s windows with 1 s overlap so words on a boundary
+    aren't lost. Outputs are concatenated with light de-overlap (drop
+    repeated trailing words from the previous window).
+    """
+    if whisper_model is None or whisper_processor is None:
+        return ""
+
+    win = WHISPER_WINDOW_S * INPUT_SAMPLE_RATE
+    hop = (WHISPER_WINDOW_S - WHISPER_OVERLAP_S) * INPUT_SAMPLE_RATE
+
+    # Single-shot path for clips that fit in one window.
+    if len(audio_f32_16k) <= win:
+        assert _whisper_lock is not None
+        async with _serialize(_whisper_lock, _whisper_stats):
+            loop = asyncio.get_event_loop()
+            return await loop.run_in_executor(
+                None, _whisper_transcribe_sync, audio_f32_16k
+            )
+
+    parts: list[str] = []
+    for start in range(0, len(audio_f32_16k), hop):
+        chunk = audio_f32_16k[start : start + win]
+        if len(chunk) < int(0.5 * INPUT_SAMPLE_RATE):
+            continue
+        assert _whisper_lock is not None
+        async with _serialize(_whisper_lock, _whisper_stats):
+            loop = asyncio.get_event_loop()
+            text = await loop.run_in_executor(
+                None, _whisper_transcribe_sync, chunk
+            )
+        text = (text or "").strip()
+        if not text:
+            continue
+        if parts:
+            # De-overlap: drop the leading words of `text` if they
+            # repeat the trailing words of the previous chunk. Greedy
+            # 5-word check is enough for the 1 s overlap we use.
+            prev_tail = parts[-1].split()[-5:]
+            new_head = text.split()
+            cut = 0
+            for n in range(min(5, len(new_head)), 0, -1):
+                if new_head[:n] == prev_tail[-n:]:
+                    cut = n
+                    break
+            if cut:
+                text = " ".join(new_head[cut:])
+        if text:
+            parts.append(text)
+    return " ".join(parts).strip()
+
+
+# ============================================================
 # LLM (Qwen2.5-Instruct) — used by the conversation endpoint
 # ============================================================
 # Cached prefill of the system prompt. Built once at startup and reused
@@ -1245,10 +1367,11 @@ def _llm_generate_sync(messages: list[dict], max_new_tokens: int = 256) -> str:
 # ============================================================
 @asynccontextmanager
 async def lifespan(app: FastAPI):
-    global processor, model, _tts_lock, _asr_lock, _llm_lock
+    global processor, model, _tts_lock, _asr_lock, _whisper_lock, _llm_lock
     # Locks must be created on the running event loop, not at import time.
     _tts_lock = asyncio.Lock()
     _asr_lock = asyncio.Lock()
+    _whisper_lock = asyncio.Lock()
     _llm_lock = asyncio.Lock()
     print(f"[startup] loading {MODEL_NAME} with flash_attention_2...")
     t0 = time.time()
@@ -1321,6 +1444,41 @@ async def lifespan(app: FastAPI):
             asr_model = None
     else:
         print("[startup] ASR disabled via MV_ASR_ENABLED=0")
+
+    # load Whisper-large-v3-turbo for the conversation path's long-audio
+    # transcription (>30s where Gemma 4's 30s cap kicks in). Whisper has
+    # better Arabic + dialect coverage than VibeVoice-ASR — it's a
+    # dedicated ASR model trained on 5M+ hours of speech, vs VibeVoice's
+    # smaller multilingual training. Native cap is 30s per call so we
+    # window long inputs in `_whisper_long_audio` further down.
+    if WHISPER_ENABLED:
+        global whisper_processor, whisper_model
+        try:
+            from transformers import AutoModelForSpeechSeq2Seq, AutoProcessor
+            print(f"[startup] loading Whisper {WHISPER_MODEL_NAME} (fp16)…")
+            t0 = time.time()
+            whisper_processor = AutoProcessor.from_pretrained(WHISPER_MODEL_NAME)
+            whisper_model = AutoModelForSpeechSeq2Seq.from_pretrained(
+                WHISPER_MODEL_NAME,
+                torch_dtype=torch.float16,
+                low_cpu_mem_usage=True,
+                use_safetensors=True,
+            ).to("cuda")
+            whisper_model.eval()
+            print(f"[startup] Whisper loaded in {time.time()-t0:.1f}s, "
+                  f"GPU mem total={torch.cuda.memory_allocated()/1e9:.1f}GB")
+            try:
+                _silent = np.zeros(int(1.0 * INPUT_SAMPLE_RATE), dtype=np.float32)
+                _ = _whisper_transcribe_sync(_silent)
+                print("[startup] Whisper warmup done")
+            except Exception as e:
+                print(f"[startup] Whisper warmup error: {e}")
+        except Exception as e:
+            print(f"[startup] Whisper DISABLED — load failed: {e}")
+            whisper_processor = None
+            whisper_model = None
+    else:
+        print("[startup] Whisper disabled via MV_WHISPER_ENABLED=0")
 
     # load LLM (Qwen2.5-Instruct) for the conversation endpoint
     if LLM_ENABLED:
@@ -1425,6 +1583,8 @@ async def health():
         version="1.0.0",
         asr_loaded=asr_model is not None,
         asr_model=ASR_MODEL_NAME if asr_model is not None else None,
+        whisper_loaded=whisper_model is not None,
+        whisper_model=WHISPER_MODEL_NAME if whisper_model is not None else None,
         llm_loaded=llm_model is not None,
         llm_model=LLM_MODEL_NAME if llm_model is not None else None,
         gemma4=gemma_h,
@@ -2256,17 +2416,27 @@ async def conversation_ws(ws: WebSocket):
                     asr_audio = audio_f32_24k
                     if len(asr_audio) > ASR_MAX_AUDIO_SAMPLES:
                         asr_audio = asr_audio[-ASR_MAX_AUDIO_SAMPLES:]
-                    try:
-                        assert _asr_lock is not None
-                        async with _serialize(_asr_lock, _asr_stats):
-                            loop = asyncio.get_event_loop()
-                            stt = await loop.run_in_executor(
-                                None, _asr_transcribe_sync, asr_audio
-                            )
-                    except Exception as e:
-                        print(f"[asr-bg] failed: {e}")
-                        return
-                    raw_text = (stt.get("text") or "").strip()
+                    raw_text = ""
+                    # Prefer Whisper for the chat-bubble transcript too —
+                    # better Arabic, same memory budget. Fall back to
+                    # VibeVoice-ASR if Whisper isn't loaded or fails.
+                    if whisper_model is not None:
+                        try:
+                            raw_text = await _whisper_long_audio(audio_f32_16k)
+                        except Exception as e:
+                            print(f"[asr-bg] whisper failed: {e}")
+                    if not raw_text:
+                        try:
+                            assert _asr_lock is not None
+                            async with _serialize(_asr_lock, _asr_stats):
+                                loop = asyncio.get_event_loop()
+                                stt = await loop.run_in_executor(
+                                    None, _asr_transcribe_sync, asr_audio
+                                )
+                            raw_text = (stt.get("text") or "").strip()
+                        except Exception as e:
+                            print(f"[asr-bg] failed: {e}")
+                            return
                     clean_text = _clean_asr_text_for_display(raw_text)
                     if not clean_text:
                         return
@@ -2348,7 +2518,17 @@ async def conversation_ws(ws: WebSocket):
                     else:
                         print("[conversation] Gemma path failed — falling back to ASR+Qwen")
                     try:
-                        raw_text = await _asr_long_audio(audio_f32_24k)
+                        # Prefer Whisper (better Arabic + dialect than
+                        # VibeVoice-ASR). Fall back to VibeVoice-ASR if
+                        # Whisper isn't loaded or returns nothing.
+                        raw_text = ""
+                        if whisper_model is not None:
+                            try:
+                                raw_text = await _whisper_long_audio(audio_f32_16k)
+                            except Exception as e:
+                                print(f"[conversation] Whisper failed: {e}")
+                        if not raw_text:
+                            raw_text = await _asr_long_audio(audio_f32_24k)
                         user_text = _clean_asr_text_for_display(raw_text)
                         if user_text:
                             audio_url = (
