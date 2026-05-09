@@ -1,48 +1,97 @@
-# Audio files (large)
-*.mp3
-*.mp4
-*.wav
-*.m4a
-*.ogg
-
-# Generated outputs
-static/audio/jobs/
-static/audio/*/audio_16k.wav
-static/audio/*/orig*
-static/audio/*/clone*
-long_results/
-long_results_old/
-long_results_v2/
-
-# Model caches
-pretrained_models/
-*.pt
-*.bin
-*.safetensors
-
 # Python
 __pycache__/
 *.pyc
 *.pyo
-.pytest_cache/
-.venv/
+*.pyd
+*.egg-info/
+*.egg
+build/
+dist/
+
+# Python virtual environments
 venv/
+.venv/
+env/
 
-# Logs
+# Node.js
+node_modules/
+.next/
+out/
+.turbo/
 *.log
-nohup.out
-
-# Local secrets
-.env
-.env.*
-
-# Editor
-.vscode/
-.idea/
+npm-debug.log*
 
 # OS
 .DS_Store
 Thumbs.db
 
-# Allow keeping fixtures
+# Editor
+.idea/
+.vscode/
+*.swp
+*.swo
+
+# Models, cache, large data (not for git)
+hf-cache/
+*.safetensors
+*.bin
+*.pt
+*.pth
+models/
+pretrained_models/
+
+# Audio assets (too large for git, sensitive)
+*.wav
+*.mp3
+*.mp4
+*.m4a
+*.webm
+*.opus
+*.flac
+*.ogg
+tts_compare/
+long_results/
+long_results_old/
+long_results_v2/
+static/audio/jobs/
+static/audio/*/audio_16k.wav
+static/audio/*/orig*
+static/audio/*/clone*
+
+# Reference audio in voice library / refs
+voices/
+SPEAKER_*.wav
+SPEAKER_*.json
+
+# Secrets / env
+.env
+.env.*
+*.key
+*.pem
+*_secret*
+credentials.json
+
+# Project-specific scratch files (legacy ad-hoc testing)
+_*.py
+_*.json
+_*.txt
+_*.sh
+
+# Code analysis dump (was for offline reading only)
+vibevoice_streaming/code_analysis/
+
+# Old single-file experiments superseded by Next.js client
+vibevoice_streaming/client.html
+vibevoice_streaming/client_v2.html
+
+# Logs
+nohup.out
+
+# RunPod-specific files
+*.runpod.json
+
+# Claude Code memory (private project notes)
+.claude/
+
+# Allow keeping test fixtures
 !engine/tests/fixtures/short_arabic.wav

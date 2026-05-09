@@ -1,0 +1,205 @@
+<!doctype html>
+<html lang="ar" dir="rtl">
+<head>
+<meta charset="utf-8">
+<title>مُسْتَشَار — اختبار البث الصوتي</title>
+<style>
+  * { box-sizing: border-box; }
+  body {
+    font-family: 'Segoe UI', Tahoma, sans-serif;
+    max-width: 800px; margin: 2em auto; padding: 1em;
+    background: #f5f5f7; color: #222;
+  }
+  h1 { color: #1a3a8a; }
+  .card {
+    background: white; border-radius: 12px; padding: 1.5em;
+    box-shadow: 0 2px 8px rgba(0,0,0,0.06); margin-bottom: 1em;
+  }
+  textarea {
+    width: 100%; min-height: 120px; padding: 1em;
+    border: 1px solid #ddd; border-radius: 8px; font: inherit;
+    font-size: 16px; line-height: 1.7; direction: rtl;
+  }
+  button {
+    background: #2962ff; color: white; border: 0; padding: 0.75em 1.5em;
+    border-radius: 8px; font-size: 16px; cursor: pointer; font-weight: 600;
+  }
+  button:hover { background: #1e4dc7; }
+  button:disabled { background: #999; cursor: wait; }
+  .controls { display: flex; gap: 0.75em; align-items: center; margin: 1em 0; flex-wrap: wrap; }
+  .controls label { font-size: 14px; color: #555; }
+  select { padding: 0.5em; border-radius: 6px; border: 1px solid #ddd; font: inherit; }
+  .status { color: #666; font-size: 14px; padding: 0.5em 0; min-height: 1.5em; }
+  .metrics { display: grid; grid-template-columns: repeat(auto-fit, minmax(160px, 1fr)); gap: 0.75em; margin-top: 1em; }
+  .metric { background: #eef3ff; padding: 0.75em 1em; border-radius: 8px; }
+  .metric .label { font-size: 12px; color: #555; }
+  .metric .value { font-size: 24px; font-weight: 700; color: #1a3a8a; }
+  .chunks { margin-top: 1em; }
+  .chunk { padding: 0.5em 1em; background: #f9f9fb; border-radius: 6px; margin: 0.25em 0; font-size: 14px; }
+  .chunk.playing { background: #fff3cd; }
+  .chunk.played { background: #d4edda; opacity: 0.7; }
+</style>
+</head>
+<body>
+  <h1>🎙️ منصة مُسْتَشَار — اختبار البث الصوتي</h1>
+
+  <div class="card">
+    <label><b>النص للقراءة بصوتك المستنسخ:</b></label>
+    <textarea id="text">مرحبا بكم في منصة مستشار. هذا اختبار للبث الصوتي بالعربية. نحن نختبر تقنية تقطيع الجمل لخفض زمن الاستجابة.</textarea>
+
+    <div class="controls">
+      <label>استراتيجية التقطيع:
+        <select id="strategy">
+          <option value="sentence" selected>على مستوى الجملة (.! ?)</option>
+          <option value="sub_sentence">على مستوى أصغر (، .)</option>
+        </select>
+      </label>
+      <label>الصوت:
+        <select id="voice">
+          <option value="default" selected>صوت العميل الافتراضي</option>
+        </select>
+      </label>
+      <button id="play">🔊 ابدأ التشغيل</button>
+      <button id="stop" disabled>⏹ إيقاف</button>
+    </div>
+
+    <div class="status" id="status">جاهز.</div>
+
+    <div class="metrics">
+      <div class="metric"><div class="label">TTFA (أول صوت)</div><div class="value" id="ttfa">—</div></div>
+      <div class="metric"><div class="label">عدد الأجزاء</div><div class="value" id="n_chunks">—</div></div>
+      <div class="metric"><div class="label">إجمالي الوقت</div><div class="value" id="total_wall">—</div></div>
+      <div class="metric"><div class="label">إجمالي الصوت</div><div class="value" id="total_audio">—</div></div>
+    </div>
+
+    <div class="chunks" id="chunks"></div>
+  </div>
+
+<script>
+let ws = null;
+let audioCtx = null;
+let nextStartTime = 0;
+let pendingChunks = [];
+let activeChunkIdx = 0;
+
+function setStatus(s) { document.getElementById('status').textContent = s; }
+function setMetric(id, v) { document.getElementById(id).textContent = v; }
+
+async function decodeWavBytes(arrayBuffer) {
+  // Decode WAV bytes via AudioContext.decodeAudioData
+  return await audioCtx.decodeAudioData(arrayBuffer);
+}
+
+function startPlayback() {
+  setStatus("جارٍ الاتصال بالسيرفر...");
+  document.getElementById('play').disabled = true;
+  document.getElementById('stop').disabled = false;
+  document.getElementById('chunks').innerHTML = '';
+  setMetric('ttfa', '—');
+  setMetric('n_chunks', '—');
+  setMetric('total_wall', '—');
+  setMetric('total_audio', '—');
+
+  audioCtx = new (window.AudioContext || window.webkitAudioContext)({ sampleRate: 24000 });
+  nextStartTime = 0;
+  pendingChunks = [];
+  activeChunkIdx = 0;
+
+  const url = (location.protocol === 'https:' ? 'wss://' : 'ws://') + location.host + '/tts/stream';
+  ws = new WebSocket(url);
+  ws.binaryType = 'arraybuffer';
+
+  const requestSent = performance.now();
+
+  ws.onopen = () => {
+    setStatus("متصل. جارٍ الإرسال...");
+    ws.send(JSON.stringify({
+      text: document.getElementById('text').value,
+      voice_id: document.getElementById('voice').value,
+      chunk_strategy: document.getElementById('strategy').value,
+    }));
+  };
+
+  let nextChunkMeta = null;
+
+  ws.onmessage = async (ev) => {
+    if (typeof ev.data === 'string') {
+      const msg = JSON.parse(ev.data);
+      if (msg.type === 'meta') {
+        setMetric('n_chunks', msg.n_chunks);
+        setStatus(`السيرفر يولّد ${msg.n_chunks} أجزاء...`);
+      } else if (msg.type === 'chunk_meta') {
+        nextChunkMeta = msg;
+        const div = document.createElement('div');
+        div.className = 'chunk';
+        div.id = `chunk-${msg.i}`;
+        div.textContent = `[${msg.i}] (${msg.audio_duration_s}s، تَوَلُّد ${msg.gen_time_s}s، t+${msg.ms_since_request}ms): ${msg.text}`;
+        document.getElementById('chunks').appendChild(div);
+      } else if (msg.type === 'done') {
+        setStatus(`اكتمل التوليد. ${msg.total_chunks} أجزاء، إجمالي صوت ${msg.total_audio_s}s، إجمالي وقت ${msg.total_wall_ms}ms.`);
+        setMetric('total_wall', msg.total_wall_ms + 'ms');
+        setMetric('total_audio', msg.total_audio_s + 's');
+      } else if (msg.type === 'error') {
+        setStatus("خطأ: " + msg.message);
+      }
+    } else {
+      // Binary WAV chunk
+      const arrayBuffer = ev.data;
+      const buffer = await decodeWavBytes(arrayBuffer);
+
+      if (activeChunkIdx === 0) {
+        // First chunk — measure TTFA from request to playback ready
+        const ttfa = performance.now() - requestSent;
+        setMetric('ttfa', Math.round(ttfa) + 'ms');
+        setStatus(`جاري التشغيل... TTFA = ${Math.round(ttfa)}ms`);
+      }
+
+      // Schedule playback to start after the previous chunk ends (gapless)
+      if (nextStartTime < audioCtx.currentTime) {
+        nextStartTime = audioCtx.currentTime;
+      }
+      const src = audioCtx.createBufferSource();
+      src.buffer = buffer;
+      src.connect(audioCtx.destination);
+      const startAt = nextStartTime;
+      const myIdx = activeChunkIdx;
+      src.start(startAt);
+      src.onended = () => {
+        const el = document.getElementById(`chunk-${myIdx}`);
+        if (el) el.classList.add('played');
+      };
+      // mark as "playing" right when its scheduled time begins
+      const delay = (startAt - audioCtx.currentTime) * 1000;
+      setTimeout(() => {
+        const el = document.getElementById(`chunk-${myIdx}`);
+        if (el) el.classList.add('playing');
+      }, Math.max(0, delay));
+
+      nextStartTime = startAt + buffer.duration;
+      activeChunkIdx += 1;
+    }
+  };
+
+  ws.onerror = (e) => {
+    setStatus("خطأ اتصال WebSocket");
+    document.getElementById('play').disabled = false;
+    document.getElementById('stop').disabled = true;
+  };
+
+  ws.onclose = () => {
+    document.getElementById('play').disabled = false;
+    document.getElementById('stop').disabled = true;
+  };
+}
+
+function stopPlayback() {
+  if (ws) ws.close();
+  if (audioCtx) audioCtx.close();
+  setStatus("تم الإيقاف");
+}
+
+document.getElementById('play').addEventListener('click', startPlayback);
+document.getElementById('stop').addEventListener('click', stopPlayback);
+</script>
+</body>
+</html>

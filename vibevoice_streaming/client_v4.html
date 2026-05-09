@@ -1,0 +1,628 @@
+<!doctype html>
+<html lang="ar" dir="rtl">
+<head>
+<meta charset="utf-8">
+<title>مُسْتَشَار — استنساخ الصوت + المكتبة</title>
+<style>
+  * { box-sizing: border-box; }
+  :root {
+    --bg: #0a0a0d;
+    --panel: #131318;
+    --panel2: #1c1c24;
+    --border: #2a2a35;
+    --text: #e8e8ee;
+    --muted: #8a8a96;
+    --accent: #4f8cff;
+    --accent-hover: #3a76f0;
+    --success: #10b981;
+    --danger: #ef4444;
+  }
+  body {
+    margin: 0; padding: 0;
+    font-family: -apple-system, BlinkMacSystemFont, 'Segoe UI', Tahoma, sans-serif;
+    background: var(--bg); color: var(--text); min-height: 100vh;
+  }
+  .nav {
+    display: flex; gap: 0; border-bottom: 1px solid var(--border);
+    padding: 0 1.5em; background: var(--panel);
+  }
+  .nav-tab {
+    padding: 1em 1.5em; cursor: pointer; color: var(--muted);
+    border-bottom: 2px solid transparent; font-weight: 500;
+    transition: all 0.2s;
+  }
+  .nav-tab:hover { color: var(--text); }
+  .nav-tab.active { color: var(--text); border-bottom-color: var(--accent); }
+  .nav-spacer { flex: 1; }
+  .nav-balance { padding: 1em; color: var(--muted); font-size: 14px; }
+  main { max-width: 1100px; margin: 2em auto; padding: 0 1.5em; }
+  h1 { color: #fff; font-size: 24px; margin: 0 0 1.5em 0; }
+  .panel {
+    background: var(--panel); border: 1px solid var(--border);
+    border-radius: 12px; padding: 1.5em; margin-bottom: 1em;
+  }
+  label { display: block; font-size: 13px; color: var(--muted); margin-bottom: 0.5em; }
+  label .required { color: var(--danger); }
+  input[type=text], select, textarea {
+    width: 100%; padding: 0.75em 1em;
+    background: var(--panel2); border: 1px solid var(--border);
+    border-radius: 8px; color: var(--text); font: inherit; font-size: 15px;
+    direction: rtl;
+  }
+  textarea { min-height: 90px; line-height: 1.6; resize: vertical; }
+  input:focus, select:focus, textarea:focus {
+    outline: none; border-color: var(--accent);
+  }
+  button {
+    background: var(--accent); color: white; border: 0;
+    padding: 0.75em 1.5em; border-radius: 8px; font: inherit; font-weight: 600;
+    cursor: pointer; transition: background 0.2s;
+  }
+  button:hover { background: var(--accent-hover); }
+  button:disabled { background: #444; cursor: not-allowed; }
+  button.secondary { background: var(--panel2); border: 1px solid var(--border); }
+  button.secondary:hover { background: #2a2a35; }
+  button.danger { background: var(--danger); }
+  .tabs { display: flex; gap: 0.5em; margin-bottom: 1em; }
+  .tab {
+    flex: 1; padding: 1em; text-align: center; cursor: pointer;
+    background: var(--panel2); border: 1px solid var(--border); border-radius: 8px;
+    color: var(--muted); font-weight: 500;
+  }
+  .tab.active { color: var(--text); border-color: var(--accent); background: rgba(79,140,255,0.08); }
+  .info-box {
+    background: var(--panel2); border-radius: 8px; padding: 1em;
+    font-size: 14px; color: var(--muted); margin-top: 1em;
+  }
+  .info-box ul { margin: 0.5em 0 0 1em; padding: 0; }
+  .info-box li { margin: 0.3em 0; list-style: none; position: relative; padding-right: 1.5em; }
+  .info-box li::before { content: '✓'; position: absolute; right: 0; color: var(--success); }
+  .upload-zone {
+    border: 2px dashed var(--border); border-radius: 8px; padding: 2em;
+    text-align: center; cursor: pointer; transition: all 0.2s;
+  }
+  .upload-zone:hover { border-color: var(--accent); background: rgba(79,140,255,0.04); }
+  .upload-zone input { display: none; }
+  .file-row {
+    background: var(--panel2); border-radius: 8px; padding: 0.75em 1em;
+    display: flex; align-items: center; gap: 0.75em; margin-top: 0.5em;
+  }
+  .file-row .name { flex: 1; }
+  .waveform-container {
+    margin-top: 1em; background: var(--panel2); border-radius: 8px;
+    padding: 1em; position: relative;
+  }
+  #waveform { width: 100%; height: 100px; cursor: crosshair; }
+  .waveform-controls {
+    display: flex; gap: 1em; align-items: center; margin-top: 0.5em;
+    font-size: 14px; color: var(--muted);
+  }
+  .row { display: grid; grid-template-columns: 1fr 1fr; gap: 1em; }
+  /* Voice Library */
+  .voice-list { display: flex; flex-direction: column; gap: 0.5em; }
+  .voice-item {
+    display: flex; align-items: center; gap: 1em;
+    background: var(--panel2); border: 1px solid var(--border); border-radius: 10px;
+    padding: 0.75em 1em; cursor: pointer; transition: all 0.2s;
+  }
+  .voice-item:hover { background: #232330; }
+  .voice-item.selected { border-color: var(--accent); background: rgba(79,140,255,0.08); }
+  .voice-play {
+    width: 40px; height: 40px; border-radius: 50%; background: #2a2a35;
+    display: flex; align-items: center; justify-content: center; flex-shrink: 0;
+    cursor: pointer; transition: background 0.2s;
+  }
+  .voice-play:hover { background: var(--accent); }
+  .voice-meta { flex: 1; }
+  .voice-name { font-weight: 600; font-size: 15px; }
+  .voice-sub { font-size: 13px; color: var(--muted); }
+  .voice-lang { background: #2a4d2a; color: #6dd66d; padding: 0.15em 0.5em; border-radius: 4px; font-size: 11px; }
+  .voice-actions { display: flex; gap: 0.5em; }
+  .icon-btn {
+    background: transparent; border: 0; padding: 0.5em; color: var(--muted);
+    cursor: pointer; border-radius: 6px;
+  }
+  .icon-btn:hover { color: var(--text); background: var(--panel2); }
+  /* Player at bottom */
+  .player {
+    position: sticky; bottom: 1em; margin-top: 1em;
+    background: var(--panel); border: 1px solid var(--border);
+    border-radius: 12px; padding: 1em;
+  }
+  .player textarea { background: var(--panel2); }
+  .player-actions { display: flex; gap: 0.75em; align-items: center; margin-top: 0.75em; }
+  .ttfa-display { color: var(--muted); font-size: 14px; margin-right: auto; }
+  .ttfa-good { color: var(--success); font-weight: 600; }
+  .empty {
+    text-align: center; padding: 3em 1em; color: var(--muted);
+  }
+  .toast {
+    position: fixed; top: 1em; left: 50%; transform: translateX(-50%);
+    background: var(--panel); border: 1px solid var(--border); border-radius: 8px;
+    padding: 0.75em 1.5em; color: var(--text); z-index: 1000; display: none;
+  }
+  .toast.error { border-color: var(--danger); }
+  .toast.success { border-color: var(--success); }
+  .spinner {
+    display: inline-block; width: 14px; height: 14px;
+    border: 2px solid rgba(255,255,255,0.3); border-top-color: #fff;
+    border-radius: 50%; animation: spin 0.8s linear infinite;
+  }
+  @keyframes spin { to { transform: rotate(360deg); } }
+</style>
+</head>
+<body>
+
+<div class="nav">
+  <div class="nav-tab" data-route="clone">📤 استنساخ صوت</div>
+  <div class="nav-tab" data-route="library">🎤 مكتبة الأصوات</div>
+  <div class="nav-spacer"></div>
+  <div class="nav-balance" id="balance">VibeVoice-Large + 7B</div>
+</div>
+
+<main id="main"></main>
+
+<div class="toast" id="toast"></div>
+
+<template id="tpl-clone">
+  <h1>Instant Clone</h1>
+  <div class="panel">
+    <label>المقطع <span class="required">*</span></label>
+    <div class="tabs">
+      <div class="tab active" data-mode="upload">📎 رفع ملف</div>
+      <div class="tab" data-mode="record">🎙️ تسجيل</div>
+    </div>
+
+    <div data-pane="upload">
+      <label class="upload-zone" id="upload-zone">
+        <input type="file" id="audio-file" accept="audio/*">
+        <div style="font-weight:600;color:#fff">اضغط لرفع مقطع صوتي</div>
+        <div style="margin-top:0.5em;font-size:13px;color:var(--muted)">MP3 / WAV / M4A — حد أقصى 4 MB</div>
+      </label>
+      <div id="file-info" style="display:none"></div>
+    </div>
+
+    <div data-pane="record" style="display:none">
+      <div style="text-align:center;padding:2em">
+        <button id="record-btn" style="padding:1em 2em">🎙️ ابدأ التسجيل</button>
+        <div id="record-status" style="margin-top:1em;color:var(--muted)"></div>
+      </div>
+    </div>
+
+    <div class="info-box">
+      <strong style="color:#fff">للحصول على أفضل نتيجة:</strong>
+      <ul>
+        <li>تجنب الصمت الطويل والوقفات</li>
+        <li>استخدم وتيرة وحجم الصوت الذي تريد أن يطابقها الصوت المستنسخ</li>
+        <li>قص المقطع لإزالة الصمت والضوضاء قبل الإرسال</li>
+      </ul>
+    </div>
+
+    <div class="waveform-container" id="wave-container" style="display:none">
+      <div style="font-size:13px;color:var(--muted);margin-bottom:0.5em">اختر 3-30 ثانية للاستنساخ</div>
+      <canvas id="waveform"></canvas>
+      <div class="waveform-controls">
+        <button id="play-clip" class="secondary" style="padding:0.4em 0.8em">▶</button>
+        <span id="clip-info">—</span>
+      </div>
+    </div>
+  </div>
+
+  <div class="panel">
+    <div class="row">
+      <div>
+        <label>الاسم <span class="required">*</span></label>
+        <input type="text" id="voice-name" placeholder="مثال: صوت أحمد">
+      </div>
+      <div>
+        <label>اللغة <span class="required">*</span></label>
+        <select id="voice-lang">
+          <option value="ar">العربية (Arabic)</option>
+          <option value="en">English</option>
+          <option value="multi">متعدد اللغات</option>
+        </select>
+      </div>
+    </div>
+    <label style="margin-top:1em">الوصف (اختياري)</label>
+    <input type="text" id="voice-desc" placeholder="ملاحظات عن الصوت">
+    <div style="margin-top:1.5em;display:flex;align-items:center;gap:1em">
+      <button id="clone-btn">
+        <span id="clone-btn-text">🎯 استنساخ الصوت</span>
+      </button>
+      <span style="font-family:monospace;color:var(--muted);font-size:13px">POST /voices/clone</span>
+    </div>
+  </div>
+</template>
+
+<template id="tpl-library">
+  <h1>مكتبة الأصوات</h1>
+  <div class="panel">
+    <input type="text" id="search" placeholder="🔍 بحث...">
+    <div class="voice-list" id="voice-list" style="margin-top:1em"></div>
+  </div>
+
+  <div class="player" id="player" style="display:none">
+    <label>اكتب نصاً ليُقرأ بصوت <span id="selected-name" style="color:#fff;font-weight:600"></span></label>
+    <textarea id="tts-text" placeholder="اكتب أي نص هنا..."></textarea>
+    <div class="player-actions">
+      <button id="play-btn">🔊 تشغيل</button>
+      <button id="stop-btn" class="secondary" disabled>⏹ إيقاف</button>
+      <span class="ttfa-display" id="ttfa-display">جاهز</span>
+    </div>
+  </div>
+</template>
+
+<script>
+let audioFile = null;
+let audioBuffer = null;
+let regionStart = 0;
+let regionEnd = 10;
+let selectedVoice = null;
+let voices = [];
+let recorder = null;
+let recordedChunks = [];
+
+function $(s, root=document) { return root.querySelector(s); }
+function $$(s, root=document) { return [...root.querySelectorAll(s)]; }
+function toast(msg, type='') {
+  const t = $('#toast');
+  t.textContent = msg; t.className = 'toast ' + type; t.style.display = 'block';
+  setTimeout(() => t.style.display = 'none', 3000);
+}
+
+// Routing
+function setRoute(name, params={}) {
+  const hash = '#' + name + (params.selected ? '?selected=' + params.selected : '');
+  if (location.hash !== hash) location.hash = hash;
+  $$('.nav-tab').forEach(t => t.classList.toggle('active', t.dataset.route === name));
+  const main = $('#main');
+  main.innerHTML = '';
+  const tpl = $('#tpl-' + name).content.cloneNode(true);
+  main.appendChild(tpl);
+  if (name === 'clone') initClone();
+  else if (name === 'library') initLibrary(params.selected);
+}
+
+function parseHash() {
+  const h = location.hash.slice(1);
+  const [name, qs] = h.split('?');
+  const params = {};
+  if (qs) qs.split('&').forEach(kv => { const [k,v] = kv.split('='); params[k] = v; });
+  return { name: name || 'clone', params };
+}
+
+window.addEventListener('hashchange', () => {
+  const { name, params } = parseHash();
+  setRoute(name, params);
+});
+
+$$('.nav-tab').forEach(t => t.addEventListener('click', () => setRoute(t.dataset.route)));
+
+// ============ CLONE ============
+async function initClone() {
+  const tabs = $$('.tab');
+  tabs.forEach(t => t.addEventListener('click', () => {
+    tabs.forEach(x => x.classList.toggle('active', x === t));
+    $$('[data-pane]').forEach(p => p.style.display = p.dataset.pane === t.dataset.mode ? '' : 'none');
+  }));
+
+  $('#audio-file').addEventListener('change', (e) => {
+    const f = e.target.files[0];
+    if (!f) return;
+    handleAudioFile(f);
+  });
+
+  $('#record-btn').addEventListener('click', toggleRecord);
+  $('#clone-btn').addEventListener('click', cloneVoice);
+}
+
+async function handleAudioFile(file) {
+  audioFile = file;
+  $('#file-info').style.display = '';
+  $('#file-info').innerHTML = `<div class="file-row"><span>📁</span><span class="name">${file.name}</span><span style="color:var(--muted)">${(file.size/1024).toFixed(0)} KB</span></div>`;
+
+  // Decode audio for waveform
+  const arrayBuffer = await file.arrayBuffer();
+  const ctx = new (window.AudioContext || window.webkitAudioContext)({ sampleRate: 24000 });
+  audioBuffer = await ctx.decodeAudioData(arrayBuffer);
+
+  $('#wave-container').style.display = '';
+  drawWaveform();
+  regionStart = 0;
+  regionEnd = Math.min(10, audioBuffer.duration);
+  updateClipInfo();
+}
+
+function drawWaveform() {
+  const c = $('#waveform');
+  const dpr = window.devicePixelRatio || 1;
+  c.width = c.clientWidth * dpr; c.height = c.clientHeight * dpr;
+  const ctx = c.getContext('2d');
+  ctx.scale(dpr, dpr);
+
+  const w = c.clientWidth, h = c.clientHeight;
+  const channelData = audioBuffer.getChannelData(0);
+  const samplesPerPixel = Math.ceil(channelData.length / w);
+  const dur = audioBuffer.duration;
+
+  ctx.fillStyle = '#1c1c24'; ctx.fillRect(0, 0, w, h);
+
+  // Draw waveform
+  ctx.fillStyle = '#4a4a5a';
+  for (let x = 0; x < w; x++) {
+    let max = 0;
+    for (let i = 0; i < samplesPerPixel; i++) {
+      const v = Math.abs(channelData[x*samplesPerPixel+i] || 0);
+      if (v > max) max = v;
+    }
+    const barH = max * h * 0.8;
+    ctx.fillRect(x, h/2 - barH/2, 1, barH);
+  }
+
+  // Draw region overlay
+  const x0 = (regionStart / dur) * w;
+  const x1 = (regionEnd / dur) * w;
+  ctx.fillStyle = 'rgba(79,140,255,0.18)';
+  ctx.fillRect(x0, 0, x1 - x0, h);
+  ctx.strokeStyle = '#4f8cff'; ctx.lineWidth = 2;
+  ctx.strokeRect(x0, 0, x1 - x0, h);
+
+  // Re-highlight selection bars
+  ctx.fillStyle = '#4f8cff';
+  for (let x = x0; x < x1; x++) {
+    let max = 0;
+    for (let i = 0; i < samplesPerPixel; i++) {
+      const v = Math.abs(channelData[Math.floor(x)*samplesPerPixel+i] || 0);
+      if (v > max) max = v;
+    }
+    const barH = max * h * 0.8;
+    ctx.fillRect(x, h/2 - barH/2, 1, barH);
+  }
+
+  c.onmousedown = (e) => {
+    const rect = c.getBoundingClientRect();
+    const startPx = e.clientX - rect.left;
+    const startTime = (startPx / w) * dur;
+    const onMove = (ev) => {
+      const movePx = ev.clientX - rect.left;
+      const moveTime = Math.max(0, Math.min(dur, (movePx / w) * dur));
+      regionStart = Math.min(startTime, moveTime);
+      regionEnd = Math.max(startTime, moveTime);
+      // Cap to 30s
+      if (regionEnd - regionStart > 30) regionEnd = regionStart + 30;
+      // Min 3s
+      if (regionEnd - regionStart < 0.5) regionEnd = Math.min(regionStart + 0.5, dur);
+      drawWaveform();
+      updateClipInfo();
+    };
+    const onUp = () => {
+      window.removeEventListener('mousemove', onMove);
+      window.removeEventListener('mouseup', onUp);
+    };
+    window.addEventListener('mousemove', onMove);
+    window.addEventListener('mouseup', onUp);
+  };
+}
+
+function updateClipInfo() {
+  const dur = regionEnd - regionStart;
+  const ok = dur >= 3 && dur <= 30;
+  $('#clip-info').innerHTML = `${regionStart.toFixed(1)}s → ${regionEnd.toFixed(1)}s (${dur.toFixed(1)}s)` +
+    (ok ? '' : ' <span style="color:var(--danger)">⚠ 3-30s</span>');
+}
+
+async function toggleRecord() {
+  const btn = $('#record-btn');
+  const status = $('#record-status');
+  if (!recorder || recorder.state === 'inactive') {
+    try {
+      const stream = await navigator.mediaDevices.getUserMedia({ audio: true });
+      recorder = new MediaRecorder(stream);
+      recordedChunks = [];
+      recorder.ondataavailable = e => recordedChunks.push(e.data);
+      recorder.onstop = async () => {
+        stream.getTracks().forEach(t => t.stop());
+        const blob = new Blob(recordedChunks, { type: 'audio/webm' });
+        const file = new File([blob], 'recording.webm', { type: 'audio/webm' });
+        await handleAudioFile(file);
+        status.textContent = `سُجّل ${(blob.size/1024).toFixed(0)} KB`;
+      };
+      recorder.start();
+      btn.textContent = '⏹ إيقاف التسجيل';
+      btn.style.background = 'var(--danger)';
+      status.textContent = '🔴 جاري التسجيل...';
+    } catch (e) {
+      toast('فشل الوصول للمايك: ' + e.message, 'error');
+    }
+  } else {
+    recorder.stop();
+    btn.textContent = '🎙️ ابدأ التسجيل';
+    btn.style.background = '';
+  }
+}
+
+async function cloneVoice() {
+  if (!audioFile) return toast('ارفع مقطعاً صوتياً أولاً', 'error');
+  const name = $('#voice-name').value.trim();
+  if (!name) return toast('أدخل اسم الصوت', 'error');
+  const lang = $('#voice-lang').value;
+  const dur = regionEnd - regionStart;
+  if (dur < 3 || dur > 30) return toast('اختر بين 3-30 ثانية', 'error');
+
+  const btn = $('#clone-btn');
+  btn.disabled = true;
+  $('#clone-btn-text').innerHTML = '<span class="spinner"></span> جاري الاستنساخ...';
+
+  const fd = new FormData();
+  fd.append('name', name);
+  fd.append('language', lang);
+  fd.append('start_s', regionStart);
+  fd.append('end_s', regionEnd);
+  fd.append('audio', audioFile);
+
+  try {
+    const r = await fetch('/voices/clone', { method: 'POST', body: fd });
+    const j = await r.json();
+    if (!r.ok) throw new Error(j.detail || 'فشل');
+    toast('تم استنساخ الصوت ✓ ' + j.name, 'success');
+    setTimeout(() => setRoute('library', { selected: j.voice_id }), 800);
+  } catch (e) {
+    toast('خطأ: ' + e.message, 'error');
+  } finally {
+    btn.disabled = false;
+    $('#clone-btn-text').innerHTML = '🎯 استنساخ الصوت';
+  }
+}
+
+// ============ LIBRARY ============
+async function initLibrary(preselect) {
+  const r = await fetch('/voices');
+  const j = await r.json();
+  voices = j.voices;
+  renderVoices();
+  if (preselect) {
+    const v = voices.find(v => v.voice_id === preselect);
+    if (v) selectVoice(v);
+  }
+
+  $('#search').addEventListener('input', (e) => {
+    const q = e.target.value.toLowerCase();
+    $$('.voice-item').forEach(it => {
+      const name = it.querySelector('.voice-name').textContent.toLowerCase();
+      it.style.display = name.includes(q) ? '' : 'none';
+    });
+  });
+
+  $('#play-btn').addEventListener('click', playTTS);
+  $('#stop-btn').addEventListener('click', stopTTS);
+}
+
+function renderVoices() {
+  const list = $('#voice-list');
+  list.innerHTML = '';
+  if (voices.length === 0) {
+    list.innerHTML = '<div class="empty">لا توجد أصوات بعد. ارجع وأضف صوتاً جديداً.</div>';
+    return;
+  }
+  voices.forEach(v => {
+    const div = document.createElement('div');
+    div.className = 'voice-item';
+    div.dataset.id = v.voice_id;
+    const langName = {ar:'العربية', en:'English', multi:'متعدد'}[v.language] || v.language;
+    div.innerHTML = `
+      <div class="voice-play" data-action="preview">▶</div>
+      <div class="voice-meta">
+        <div class="voice-name">${v.name}</div>
+        <div class="voice-sub">
+          <span class="voice-lang">${langName}</span>
+          <span style="margin:0 0.5em">·</span>
+          ${v.dur_s.toFixed(1)}s مرجع
+        </div>
+      </div>
+      <div class="voice-actions">
+        ${v.voice_id !== 'default' ? '<button class="icon-btn" data-action="delete" title="حذف">🗑️</button>' : ''}
+      </div>
+    `;
+    div.addEventListener('click', (e) => {
+      const action = e.target.closest('[data-action]')?.dataset.action;
+      if (action === 'preview') { e.stopPropagation(); previewVoice(v); }
+      else if (action === 'delete') { e.stopPropagation(); deleteVoice(v); }
+      else { selectVoice(v); }
+    });
+    list.appendChild(div);
+  });
+}
+
+let previewAudio = null;
+function previewVoice(v) {
+  if (previewAudio) { previewAudio.pause(); previewAudio = null; }
+  previewAudio = new Audio(v.preview_url);
+  previewAudio.play();
+}
+
+async function deleteVoice(v) {
+  if (!confirm(`حذف "${v.name}"؟`)) return;
+  await fetch('/voices/' + v.voice_id, { method: 'DELETE' });
+  voices = voices.filter(x => x.voice_id !== v.voice_id);
+  renderVoices();
+  if (selectedVoice?.voice_id === v.voice_id) {
+    selectedVoice = null; $('#player').style.display = 'none';
+  }
+}
+
+function selectVoice(v) {
+  selectedVoice = v;
+  $$('.voice-item').forEach(it => it.classList.toggle('selected', it.dataset.id === v.voice_id));
+  $('#player').style.display = '';
+  $('#selected-name').textContent = v.name;
+  if (!$('#tts-text').value) $('#tts-text').value = 'مرحبا، أنا صوتك المستنسخ. أستطيع قراءة أي نص بنفس بصمتك الصوتية.';
+}
+
+let ws = null, audioCtx = null, nextStart = 0;
+async function playTTS() {
+  if (!selectedVoice) return;
+  const text = $('#tts-text').value.trim();
+  if (!text) return toast('اكتب نصاً', 'error');
+
+  $('#play-btn').disabled = true;
+  $('#stop-btn').disabled = false;
+  $('#ttfa-display').textContent = 'جارٍ الاتصال...';
+  $('#ttfa-display').className = 'ttfa-display';
+
+  audioCtx = new (window.AudioContext || window.webkitAudioContext)({ sampleRate: 24000 });
+  nextStart = 0;
+  const url = (location.protocol==='https:'?'wss://':'ws://') + location.host + '/tts/stream';
+  ws = new WebSocket(url); ws.binaryType = 'arraybuffer';
+  const start = performance.now();
+
+  ws.onopen = () => {
+    $('#ttfa-display').textContent = 'يولّد الصوت...';
+    ws.send(JSON.stringify({ text, voice_id: selectedVoice.voice_id }));
+  };
+  ws.onmessage = (ev) => {
+    if (typeof ev.data === 'string') {
+      const m = JSON.parse(ev.data);
+      if (m.type === 'ttfa') {
+        const span = $('#ttfa-display');
+        span.textContent = 'TTFA: ' + m.ms + 'ms';
+        span.className = 'ttfa-display ' + (m.ms < 500 ? 'ttfa-good' : '');
+      } else if (m.type === 'done') {
+        $('#ttfa-display').textContent = 'TTFA: ' + (parseInt($('#ttfa-display').textContent.match(/\d+/)?.[0] || 0)) + 'ms · ' + m.total_audio_s + 's صوت في ' + m.total_wall_ms + 'ms';
+      } else if (m.type === 'error') {
+        toast(m.message, 'error');
+      }
+    } else {
+      const view = new DataView(ev.data);
+      const f32 = new Float32Array(ev.data.byteLength / 2);
+      for (let i = 0; i < f32.length; i++) {
+        const s = view.getInt16(i*2, true);
+        f32[i] = s < 0 ? s/32768 : s/32767;
+      }
+      if (nextStart < audioCtx.currentTime) nextStart = audioCtx.currentTime + 0.05;
+      const buf = audioCtx.createBuffer(1, f32.length, 24000);
+      buf.copyToChannel(f32, 0);
+      const src = audioCtx.createBufferSource();
+      src.buffer = buf; src.connect(audioCtx.destination);
+      src.start(nextStart); nextStart += buf.duration;
+    }
+  };
+  ws.onclose = () => {
+    $('#play-btn').disabled = false;
+    $('#stop-btn').disabled = true;
+  };
+}
+
+function stopTTS() {
+  if (ws) ws.close();
+  if (audioCtx) audioCtx.close();
+  $('#play-btn').disabled = false;
+  $('#stop-btn').disabled = true;
+  $('#ttfa-display').textContent = 'موقوف';
+}
+
+// Init
+const initial = parseHash();
+setRoute(initial.name || 'clone', initial.params);
+</script>
+</body>
+</html>
