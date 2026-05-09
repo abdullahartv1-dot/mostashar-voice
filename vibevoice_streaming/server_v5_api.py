@@ -396,39 +396,50 @@ def _chunk_to_pcm_bytes(audio_tensor: torch.Tensor) -> bytes:
 # Generation (shared between non-streaming + streaming)
 # ============================================================
 def _format_speaker_text(text: str, speaker: int = 1) -> str:
-    """Format text so VibeVoice reads ALL lines, not just the first.
+    """Format text so VibeVoice reads it as one natural-flowing utterance.
 
-    VibeVoice expects each "turn" to begin with `Speaker N:`. If the user
-    pastes a multi-paragraph article like:
+    VibeVoice interprets every `Speaker N:` line break as a turn boundary
+    and inserts a noticeable pause between turns. That's right for a
+    dialogue but wrong for an article.
 
-        السلام عليكم.
-        هذه الفقرة الثانية.
-        هذه الفقرة الثالثة.
+    Strategy:
+      - Single newlines inside a paragraph → treated as soft wraps;
+        joined with a space so the speaker reads continuously and the
+        cadence is driven by punctuation only.
+      - Double newlines (\\n\\n) → real paragraph breaks; kept as
+        separate `Speaker N:` turns so the listener gets a natural pause.
 
-    a naive `"Speaker 1: " + text` only marks the first line, and the
-    model often stops generating after the first paragraph. Prefixing
-    every non-empty line keeps long-form articles flowing through.
+    This gives the model what it expects (turn-tagged input) without the
+    awkward "speak-pause-speak" the previous one-prefix-per-line approach
+    produced on multi-line articles.
     """
-    raw_lines = text.replace("\r\n", "\n").split("\n")
-    cleaned = [ln.strip() for ln in raw_lines]
-    cleaned = [ln for ln in cleaned if ln]
-    if not cleaned:
+    paragraphs = [p for p in text.replace("\r\n", "\n").split("\n\n")]
+    cleaned_paras: list[str] = []
+    for para in paragraphs:
+        # Collapse soft wraps inside a paragraph: "line1\nline2" → "line1 line2"
+        joined = " ".join(ln.strip() for ln in para.split("\n") if ln.strip())
+        if joined:
+            cleaned_paras.append(joined)
+    if not cleaned_paras:
         return f"Speaker {speaker}: "
-    return "\n".join(f"Speaker {speaker}: {ln}" for ln in cleaned)
+    return "\n".join(f"Speaker {speaker}: {p}" for p in cleaned_paras)
 
 
-def _lowpass_clean(audio: np.ndarray, sr: int = SAMPLE_RATE, cutoff_hz: int = 7500) -> np.ndarray:
-    """Deterministic low-pass filter — removes high-frequency hiss / hallucinated
-    'music' / MP3-derived ringing without touching the speech band.
+def _lowpass_clean(audio: np.ndarray, sr: int = SAMPLE_RATE, cutoff_hz: int = 10000) -> np.ndarray:
+    """Deterministic low-pass filter — removes the highest-band hiss /
+    hallucinated 'music' / MP3-derived ringing without touching the
+    sibilant range.
 
-    Speech content is mostly <4 kHz, sibilants top out around 8 kHz. Cutting
-    everything above 7.5 kHz with a steep Butterworth filter eliminates the
-    artifacts users hear as 'noise / wind / music' while leaving every
-    intelligible speech frequency intact.
+    Cutoff is at 10 kHz: human speech content is mostly <4 kHz, sibilants
+    (س, ش, ف, ث, خ, ح) carry energy up to ~8-10 kHz, and the MP3-derived
+    artifacts the user hears as 'music/wind' sit above 10-12 kHz. Cutting
+    at 10 kHz keeps the bite of the consonants and the natural air of the
+    voice while silencing the artifact band.
 
-    Why not noisereduce here? Tested on edge-tts premades and it actually
-    *amplified* HF artifacts (HF-band ratio went from 0.05 → 0.17, audibly
-    hissier). A surgical low-pass is more reliable and never damages speech.
+    Earlier we tried 7.5 kHz which was too aggressive — output sounded
+    slightly muffled because /s/ /sh/ partially attenuated. Earlier still
+    we tried `noisereduce` (spectral gating) and it *amplified* HF noise
+    (ratio went 0.05 → 0.17). A 10 kHz Butterworth is the sweet spot.
     """
     try:
         from scipy import signal as sps
@@ -449,7 +460,7 @@ class _StreamingLowpass:
     """Stateful low-pass for streaming chunks — preserves filter continuity
     across boundaries so we don't introduce clicks every chunk."""
 
-    def __init__(self, cutoff_hz: int = 7500, sr: int = SAMPLE_RATE, order: int = 6) -> None:
+    def __init__(self, cutoff_hz: int = 10000, sr: int = SAMPLE_RATE, order: int = 6) -> None:
         from scipy import signal as sps
         self._sos = sps.butter(N=order, Wn=cutoff_hz, btype="low", fs=sr, output="sos")
         # Per-section initial conditions, primed to a quiet start.
