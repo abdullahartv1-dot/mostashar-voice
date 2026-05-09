@@ -194,6 +194,10 @@ class TTSRequest(BaseModel):
     model_id: str = Field(default="vibevoice-large")
     output_format: str = Field(default="pcm_24000", pattern="^(pcm_24000|wav)$")
     voice_settings: Optional[VoiceSettings] = None
+    # When true, run the input text through Qwen first to add Arabic
+    # diacritics (تشكيل) and light punctuation. Improves pronunciation
+    # noticeably on bare text but adds ~300-1500 ms before TTS starts.
+    auto_diacritize: bool = Field(default=False)
 
 
 class VoiceMeta(BaseModel):
@@ -588,11 +592,13 @@ def _np_to_pcm_bytes(audio_np: np.ndarray) -> bytes:
     return a.tobytes()
 
 
-# Number of chunks to buffer at the tail before yielding. When the stream
-# ends we run librosa-based silence detection on this buffer to clip any
-# hallucinated noise the diffusion head emits after the actual content.
-# 3 chunks ≈ 0.6-1.2 s — enough for a clean trim without hurting TTFA.
-_TAIL_BUFFER_CHUNKS = 3
+# Trailing-chunk buffer for tail-noise trimming. The lower the number, the
+# faster TTFA — but we need enough lookback to detect "diffusion head got
+# bored and started emitting hiss" at the end. 1 chunk strikes the right
+# balance: TTFA cost is at most ~80 ms (one chunk), and we still have one
+# chunk of look-ahead to filter the tail. Increase only if tail noise leaks
+# back through.
+_TAIL_BUFFER_CHUNKS = 1
 
 
 async def _generate_stream(text: str, voice_id: str, settings: Optional[VoiceSettings] = None) -> AsyncGenerator[bytes, None]:
@@ -774,6 +780,58 @@ def _build_system_prefill_cache(system_prompt: str) -> Optional[dict]:
     except Exception as e:
         print(f"[llm-prefill] cache build failed: {e}")
         return None
+
+
+_DIACRITIZE_SYSTEM = (
+    "أنت مدقق لغوي عربي محترف. مهمتك: شكّل النص العربي التالي بالتشكيل "
+    "الكامل (الفتحة، الضمة، الكسرة، السكون، الشدّة، التنوين) بدقة عالية، "
+    "وأضف علامات الترقيم المناسبة (نقطة، فاصلة) إذا كانت مفقودة. "
+    "أعد النص المُشَكَّل فقط بدون أي شرح أو مقدّمة أو علامات اقتباس."
+)
+
+
+# Tiny in-memory LRU for diacritized text — repeat TTS calls with the same
+# article shouldn't pay the LLM cost twice.
+_diacritize_cache: dict[str, str] = {}
+_DIACRITIZE_CACHE_LIMIT = 256
+
+
+def _diacritize_arabic(text: str, max_chars: int = 1500) -> str:
+    """Add Arabic diacritics + light punctuation cleanup using Qwen.
+
+    Cost: ~300-1500 ms per call depending on length. Caller decides whether
+    the latency is worth the quality bump. Cached so repeat calls are free.
+    """
+    if not text or not text.strip():
+        return text
+    cache_key = text[:max_chars]
+    if cache_key in _diacritize_cache:
+        return _diacritize_cache[cache_key]
+    if llm_model is None or llm_tokenizer is None:
+        return text
+    try:
+        # Truncate input to keep generation bounded.
+        prompt_text = text[:max_chars]
+        messages = [
+            {"role": "system", "content": _DIACRITIZE_SYSTEM},
+            {"role": "user", "content": prompt_text},
+        ]
+        # Generous max_new_tokens because diacritics inflate token count.
+        out = _llm_generate_sync(messages, max_new_tokens=int(len(prompt_text) * 2.5) + 64)
+        out = out.strip().strip('"').strip("'").strip("«").strip("»").strip()
+        # Sanity check: if output is empty or way shorter than input, fall back
+        if not out or len(out) < len(prompt_text) * 0.4:
+            return text
+        if len(_diacritize_cache) >= _DIACRITIZE_CACHE_LIMIT:
+            _diacritize_cache.pop(next(iter(_diacritize_cache)))
+        _diacritize_cache[cache_key] = out
+        # If we truncated, append the rest unchanged
+        if len(text) > max_chars:
+            out = out + text[max_chars:]
+        return out
+    except Exception as e:
+        print(f"[diacritize] failed, returning original: {e}")
+        return text
 
 
 def _llm_generate_sync(messages: list[dict], max_new_tokens: int = 256) -> str:
@@ -1233,10 +1291,15 @@ async def tts_full(
 ):
     """Generate the full audio (non-streaming). Returns WAV file."""
     loop = asyncio.get_event_loop()
+    text = req.text
+    if req.auto_diacritize:
+        assert _llm_lock is not None
+        async with _serialize(_llm_lock, _llm_stats):
+            text = await loop.run_in_executor(None, _diacritize_arabic, text)
     assert _tts_lock is not None
     async with _serialize(_tts_lock, _tts_stats):
         audio = await loop.run_in_executor(
-            None, _generate_full, req.text, voice_id, req.voice_settings
+            None, _generate_full, text, voice_id, req.voice_settings
         )
     a16 = (np.clip(audio, -1.0, 1.0) * 32767).astype(np.int16)
     body = _wav_header(len(a16)) + a16.tobytes()
@@ -1258,13 +1321,23 @@ async def tts_stream(
     is_wav = req.output_format == "wav"
     media_type = "audio/wav" if is_wav else "audio/pcm"
 
+    # Resolve diacritization BEFORE the response stream begins so the
+    # latency is paid up-front (rather than mysteriously delaying TTFA
+    # while the caller is already subscribed to chunks).
+    text = req.text
+    if req.auto_diacritize:
+        loop = asyncio.get_event_loop()
+        assert _llm_lock is not None
+        async with _serialize(_llm_lock, _llm_stats):
+            text = await loop.run_in_executor(None, _diacritize_arabic, text)
+
     async def generator():
         if is_wav:
             yield _wav_streaming_header(SAMPLE_RATE)
         first_emitted = False
         assert _tts_lock is not None
         async with _serialize(_tts_lock, _tts_stats):
-            async for chunk in _generate_stream(req.text, voice_id, req.voice_settings):
+            async for chunk in _generate_stream(text, voice_id, req.voice_settings):
                 if not first_emitted:
                     ttfa_ms = (time.time() - request_start) * 1000
                     print(f"[tts_stream] voice={voice_id} TTFA={ttfa_ms:.0f}ms")
@@ -1591,6 +1664,13 @@ async def tts_ws(ws: WebSocket, voice_id: str):
             await ws.send_json({"type": "error", "message": "text required"}); return
         settings_dict = data.get("voice_settings") or {}
         settings = VoiceSettings(**settings_dict) if settings_dict else None
+        auto_diacritize = bool(data.get("auto_diacritize", False))
+
+        if auto_diacritize:
+            loop = asyncio.get_event_loop()
+            assert _llm_lock is not None
+            async with _serialize(_llm_lock, _llm_stats):
+                text = await loop.run_in_executor(None, _diacritize_arabic, text)
 
         await ws.send_json({"type": "meta", "sample_rate": SAMPLE_RATE, "format": "pcm_s16le", "voice_id": voice_id})
 
