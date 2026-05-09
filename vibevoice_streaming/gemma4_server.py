@@ -229,6 +229,108 @@ async def audio_chat(
     })
 
 
+def _build_text_messages(system: str, history: list[dict], user_text: str) -> list[dict]:
+    """Pure-text variant of `_build_messages` — used by /v1/text-chat
+    so the long-audio conversation path can pipe Whisper-transcribed
+    text through Gemma 4 (better Arabic / dialect coverage than the
+    main server's Qwen fallback)."""
+    messages: list[dict] = []
+    if system:
+        messages.append({
+            "role": "system",
+            "content": [{"type": "text", "text": system}],
+        })
+    for turn in history or []:
+        role = turn.get("role")
+        content = turn.get("content", "")
+        if role in ("user", "assistant") and content:
+            messages.append({
+                "role": role,
+                "content": [{"type": "text", "text": content}],
+            })
+    messages.append({
+        "role": "user",
+        "content": [{"type": "text", "text": user_text}],
+    })
+    return messages
+
+
+def _generate_text_sync(system: str, history: list[dict], user_text: str, max_tokens: int) -> dict:
+    """Same model + tokenizer as audio-chat, but with no audio modality.
+    Mirrors `_generate_sync` so the timing breakdown is comparable."""
+    messages = _build_text_messages(system, history, user_text)
+    t0 = time.time()
+    inputs = processor.apply_chat_template(
+        messages,
+        tokenize=True,
+        return_dict=True,
+        return_tensors="pt",
+        add_generation_prompt=True,
+    ).to(model.device)
+    prep_ms = (time.time() - t0) * 1000
+
+    t0 = time.time()
+    with torch.no_grad():
+        outputs = model.generate(
+            **inputs,
+            max_new_tokens=max_tokens,
+            do_sample=False,
+            pad_token_id=processor.tokenizer.eos_token_id,
+        )
+    gen_ms = (time.time() - t0) * 1000
+    new_ids = outputs[0, inputs["input_ids"].shape[1]:]
+    text = processor.tokenizer.decode(new_ids, skip_special_tokens=True).strip()
+    return {
+        "text": text,
+        "prep_ms": round(prep_ms),
+        "gen_ms": round(gen_ms),
+        "total_ms": round(prep_ms + gen_ms),
+    }
+
+
+async def _generate_text(system: str, history: list[dict], user_text: str, max_tokens: int) -> dict:
+    """Awaitable wrapper for `_generate_text_sync` — holds the same lock
+    as audio-chat so concurrent calls serialise on the GPU."""
+    assert _lock is not None and processor is not None and model is not None
+    async with _lock:
+        loop = asyncio.get_event_loop()
+        return await loop.run_in_executor(
+            None, _generate_text_sync, system, history, user_text, max_tokens
+        )
+
+
+@app.post("/v1/text-chat")
+async def text_chat(
+    text: str = Form(..., description="The user's message (already a string — not audio)."),
+    system: Optional[str] = Form(None, description="Override system prompt"),
+    history: Optional[str] = Form(
+        None, description='JSON list: [{"role":"user","content":"..."}, ...]'
+    ),
+    max_tokens: int = Form(160),
+):
+    """Text-only chat turn. Same Gemma 4 model as /v1/audio-chat but
+    without the audio modality — useful when the caller already has the
+    user's text (e.g. from Whisper transcription of a long clip).
+
+    Why: keeps response generation consistent across short-audio
+    (Gemma audio) and long-audio (Whisper → Gemma text) paths instead
+    of falling through to a different LM (Qwen) that has weaker
+    Arabic + dialect coverage.
+    """
+    user_text = (text or "").strip()
+    if not user_text:
+        raise HTTPException(400, "text is empty")
+    hist: list[dict] = []
+    if history:
+        try:
+            hist = json.loads(history)
+        except Exception:
+            pass
+    sys_prompt = system or DEFAULT_SYSTEM_PROMPT
+    result = await _generate_text(sys_prompt, hist, user_text, max_tokens)
+    return JSONResponse({**result, "model": MODEL_ID})
+
+
 if __name__ == "__main__":
     import uvicorn
     uvicorn.run(app, host="127.0.0.1", port=PORT, log_level="info")

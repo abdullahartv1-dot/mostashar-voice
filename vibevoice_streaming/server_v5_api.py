@@ -2540,10 +2540,33 @@ async def conversation_ws(ws: WebSocket):
                                 "turn": turn_idx,
                                 "audio_url": audio_url,
                             })
-                            response_text = await _conversation_turn(
-                                ws, voice_id, language, user_text,
-                                history, interrupt_flag,
-                            )
+                            # Prefer Gemma 4 text-chat for the response —
+                            # better Arabic + dialect quality than Qwen,
+                            # and keeps response generation consistent
+                            # with the short-audio path which already
+                            # uses Gemma. Falls back to Qwen on failure.
+                            response_text: Optional[str] = None
+                            if GEMMA4_URL:
+                                try:
+                                    gemma_resp = await _gemma4_text_chat(user_text, history)
+                                    if gemma_resp and _looks_arabic(gemma_resp):
+                                        response_text = gemma_resp
+                                        history.append({"role": "user", "content": user_text})
+                                        history.append({"role": "assistant", "content": response_text})
+                                        await _conversation_turn_with_response(
+                                            ws, voice_id, language,
+                                            user_text, response_text,
+                                            history, interrupt_flag,
+                                        )
+                                except Exception as e:
+                                    print(f"[conversation] Gemma text-chat failed: {e}")
+                            if not response_text:
+                                # Qwen fallback (also serves when Gemma is
+                                # disabled / unreachable).
+                                response_text = await _conversation_turn(
+                                    ws, voice_id, language, user_text,
+                                    history, interrupt_flag,
+                                )
                             session_log.record_turn(
                                 turn_idx, audio_path, user_text, response_text or ""
                             )
@@ -2580,6 +2603,29 @@ async def _gemma4_audio_chat(audio_f32_16k: np.ndarray, history: list[dict]) -> 
     data = {"history": json.dumps(dialog, ensure_ascii=False), "max_tokens": "160"}
     async with httpx.AsyncClient(timeout=60.0) as client:
         r = await client.post(f"{GEMMA4_URL}/v1/audio-chat", files=files, data=data)
+    r.raise_for_status()
+    j = r.json()
+    return (j.get("text") or "").strip()
+
+
+async def _gemma4_text_chat(user_text: str, history: list[dict]) -> str:
+    """Text-only chat turn against the Gemma 4 sidecar. Used by the
+    long-audio conversation path: Whisper transcribes the audio →
+    we hand the text + dialog history to Gemma 4 → Gemma generates
+    the response. Same model as the short-audio path so the user
+    gets consistent quality regardless of clip length.
+    """
+    if not GEMMA4_URL:
+        return ""
+    import httpx
+    dialog = [t for t in history if t.get("role") in ("user", "assistant")]
+    data = {
+        "text": user_text,
+        "history": json.dumps(dialog, ensure_ascii=False),
+        "max_tokens": "160",
+    }
+    async with httpx.AsyncClient(timeout=30.0) as client:
+        r = await client.post(f"{GEMMA4_URL}/v1/text-chat", data=data)
     r.raise_for_status()
     j = r.json()
     return (j.get("text") or "").strip()
