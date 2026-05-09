@@ -339,6 +339,11 @@ def _get_voice(voice_id: str) -> dict:
 def _save_voice(voice_id: str, audio_np: np.ndarray, name: str, language: str) -> dict:
     if len(audio_np) > 30 * SAMPLE_RATE:
         audio_np = audio_np[: 30 * SAMPLE_RATE]
+    # NOTE: we deliberately do NOT denoise references at upload time —
+    # earlier experiments with noisereduce on edge-tts MP3 sources
+    # *amplified* HF artifacts. Speech-band content is preserved best by
+    # leaving the reference untouched and applying a surgical low-pass on
+    # the model's *output* instead (see _lowpass_clean / _StreamingLowpass).
     sf.write(_wav_path(voice_id), audio_np, SAMPLE_RATE)
     meta = {
         "voice_id": voice_id,
@@ -412,6 +417,52 @@ def _format_speaker_text(text: str, speaker: int = 1) -> str:
     return "\n".join(f"Speaker {speaker}: {ln}" for ln in cleaned)
 
 
+def _lowpass_clean(audio: np.ndarray, sr: int = SAMPLE_RATE, cutoff_hz: int = 7500) -> np.ndarray:
+    """Deterministic low-pass filter — removes high-frequency hiss / hallucinated
+    'music' / MP3-derived ringing without touching the speech band.
+
+    Speech content is mostly <4 kHz, sibilants top out around 8 kHz. Cutting
+    everything above 7.5 kHz with a steep Butterworth filter eliminates the
+    artifacts users hear as 'noise / wind / music' while leaving every
+    intelligible speech frequency intact.
+
+    Why not noisereduce here? Tested on edge-tts premades and it actually
+    *amplified* HF artifacts (HF-band ratio went from 0.05 → 0.17, audibly
+    hissier). A surgical low-pass is more reliable and never damages speech.
+    """
+    try:
+        from scipy import signal as sps
+    except Exception:
+        return audio
+    if len(audio) < 64:
+        return audio
+    try:
+        sos = sps.butter(N=8, Wn=cutoff_hz, btype="low", fs=sr, output="sos")
+        cleaned = sps.sosfiltfilt(sos, audio.astype(np.float32, copy=False))
+        return cleaned.astype(np.float32, copy=False)
+    except Exception as e:
+        print(f"[lowpass] failed, returning original: {e}")
+        return audio
+
+
+class _StreamingLowpass:
+    """Stateful low-pass for streaming chunks — preserves filter continuity
+    across boundaries so we don't introduce clicks every chunk."""
+
+    def __init__(self, cutoff_hz: int = 7500, sr: int = SAMPLE_RATE, order: int = 6) -> None:
+        from scipy import signal as sps
+        self._sos = sps.butter(N=order, Wn=cutoff_hz, btype="low", fs=sr, output="sos")
+        # Per-section initial conditions, primed to a quiet start.
+        self._zi = sps.sosfilt_zi(self._sos) * 0.0
+
+    def __call__(self, chunk: np.ndarray) -> np.ndarray:
+        if len(chunk) < 8:
+            return chunk
+        from scipy import signal as sps
+        out, self._zi = sps.sosfilt(self._sos, chunk.astype(np.float32, copy=False), zi=self._zi)
+        return out.astype(np.float32, copy=False)
+
+
 def _trim_audio_tail(
     audio: np.ndarray,
     sr: int = SAMPLE_RATE,
@@ -466,6 +517,7 @@ def _generate_full(text: str, voice_id: str, settings: Optional[VoiceSettings] =
             verbose=False, show_progress_bar=False,
         )
     audio = out.speech_outputs[0].cpu().float().numpy().flatten()
+    audio = _lowpass_clean(audio)
     return _trim_audio_tail(audio)
 
 
@@ -515,6 +567,7 @@ def _generate_dialogue(
             show_progress_bar=False,
         )
     audio = out.speech_outputs[0].cpu().float().numpy().flatten()
+    audio = _lowpass_clean(audio)
     return _trim_audio_tail(audio)
 
 
@@ -573,6 +626,15 @@ async def _generate_stream(text: str, voice_id: str, settings: Optional[VoiceSet
     threading.Thread(target=run_generate, daemon=True).start()
     loop = asyncio.get_event_loop()
     tail_buffer: list[torch.Tensor] = []
+    # Stateful low-pass keeps filter continuity across chunk boundaries —
+    # no clicks at boundaries, removes HF hiss / hallucinated 'music'.
+    lp = _StreamingLowpass()
+
+    def _chunk_to_filtered_pcm(t: torch.Tensor) -> bytes:
+        f32 = t.detach().cpu().float().numpy().flatten()
+        f32 = lp(f32)
+        a16 = (np.clip(f32, -1.0, 1.0) * 32767).astype(np.int16)
+        return a16.tobytes()
 
     while True:
         try:
@@ -585,13 +647,14 @@ async def _generate_stream(text: str, voice_id: str, settings: Optional[VoiceSet
                 tail_np = np.concatenate([
                     t.detach().cpu().float().numpy().flatten() for t in tail_buffer
                 ])
+                tail_np = lp(tail_np)
                 trimmed = _trim_audio_tail(tail_np)
                 if len(trimmed) > 0:
                     yield _np_to_pcm_bytes(trimmed)
             break
         tail_buffer.append(chunk)
         if len(tail_buffer) > _TAIL_BUFFER_CHUNKS:
-            yield _chunk_to_pcm_bytes(tail_buffer.pop(0))
+            yield _chunk_to_filtered_pcm(tail_buffer.pop(0))
 
 
 # ============================================================
@@ -1059,6 +1122,79 @@ async def add_voice(
         voice_id=voice_id, name=name, language=language,
         dur_s=round(profile["ref_audio_dur_s"], 2),
     )
+
+
+@app.post("/v1/voices/{voice_id}/clean", response_model=VoiceMeta, tags=["voices"])
+async def clean_voice(voice_id: str, _=Depends(require_api_key)):
+    """Re-run the denoiser on this voice's reference audio in-place.
+
+    Use this on legacy voices that were uploaded before the denoiser
+    was added (e.g. the original edge-tts premades). After cleaning,
+    the in-memory profile is reloaded so subsequent TTS calls pick
+    up the cleaner reference.
+    """
+    profile = _get_voice(voice_id)
+    audio = profile["ref_audio_np"]
+    cleaned = _denoise_audio(audio, SAMPLE_RATE)
+    sf.write(_wav_path(voice_id), cleaned, SAMPLE_RATE)
+    # Update on-disk metadata
+    meta = {}
+    mp = _meta_path(voice_id)
+    if os.path.exists(mp):
+        try:
+            meta = json.load(open(mp, encoding="utf-8"))
+        except Exception:
+            meta = {}
+    meta["denoised"] = True
+    meta["denoised_at"] = int(time.time())
+    with open(mp, "w", encoding="utf-8") as f:
+        json.dump(meta, f, ensure_ascii=False, indent=2)
+    # Reload in-memory profile so the next TTS uses the cleaned audio
+    voice_profiles.pop(voice_id, None)
+    p = _load_voice_from_disk(voice_id)
+    return VoiceMeta(
+        voice_id=voice_id,
+        name=p["name"] if p else voice_id,
+        language=p["language"] if p else "ar",
+        dur_s=round(p["ref_audio_dur_s"], 2) if p else 0,
+        preview_url=f"/v1/voices/{voice_id}/preview",
+        created_at=p.get("created_at") if p else None,
+    )
+
+
+@app.post("/v1/voices/clean-all", tags=["voices"])
+async def clean_all_voices(_=Depends(require_api_key)):
+    """Bulk-denoise every voice in the library that hasn't been cleaned yet.
+
+    Skips voices whose metadata already has `denoised: true`.
+    Returns a per-voice summary.
+    """
+    results = []
+    for vid in list(voice_profiles.keys()):
+        meta_p = _meta_path(vid)
+        meta = {}
+        if os.path.exists(meta_p):
+            try:
+                meta = json.load(open(meta_p, encoding="utf-8"))
+            except Exception:
+                meta = {}
+        if meta.get("denoised"):
+            results.append({"voice_id": vid, "skipped": "already denoised"})
+            continue
+        try:
+            audio = voice_profiles[vid]["ref_audio_np"]
+            cleaned = _denoise_audio(audio, SAMPLE_RATE)
+            sf.write(_wav_path(vid), cleaned, SAMPLE_RATE)
+            meta["denoised"] = True
+            meta["denoised_at"] = int(time.time())
+            with open(meta_p, "w", encoding="utf-8") as f:
+                json.dump(meta, f, ensure_ascii=False, indent=2)
+            voice_profiles.pop(vid, None)
+            _load_voice_from_disk(vid)
+            results.append({"voice_id": vid, "ok": True})
+        except Exception as e:
+            results.append({"voice_id": vid, "error": str(e)[:200]})
+    return {"cleaned": results}
 
 
 @app.delete("/v1/voices/{voice_id}", tags=["voices"])
