@@ -105,6 +105,54 @@ VOICES_DIR = os.environ.get("MV_VOICES_DIR", "/workspace/refs/voices")
 API_KEY = os.environ.get("MV_API_KEY", "")  # if empty, auth is disabled
 os.makedirs(VOICES_DIR, exist_ok=True)
 
+SESSION_LOG_DIR = os.environ.get(
+    "MV_SESSION_LOG_DIR", "/workspace/conversation_logs"
+)
+os.makedirs(SESSION_LOG_DIR, exist_ok=True)
+
+
+class SessionLog:
+    """Per-WebSocket recorder. Saves each turn's audio + transcript +
+    response to disk so the user can recover from a dropped connection.
+
+    Layout:
+      {SESSION_LOG_DIR}/{session_id}/
+          turn_{N}.wav        ← raw 16kHz user audio
+          transcript.jsonl    ← one JSON line per turn
+    """
+
+    def __init__(self, session_id: str) -> None:
+        self.session_id = session_id
+        self.dir = os.path.join(SESSION_LOG_DIR, session_id)
+        os.makedirs(self.dir, exist_ok=True)
+        self._idx = 0
+        self._log_path = os.path.join(self.dir, "transcript.jsonl")
+
+    def next_turn_idx(self) -> int:
+        self._idx += 1
+        return self._idx
+
+    def save_audio(self, idx: int, audio: np.ndarray, sr: int) -> str:
+        path = os.path.join(self.dir, f"turn_{idx:03d}.wav")
+        sf.write(path, audio, sr)
+        return path
+
+    def record_turn(
+        self, idx: int, audio_path: str, transcript: str, response: str
+    ) -> None:
+        try:
+            with open(self._log_path, "a", encoding="utf-8") as f:
+                f.write(json.dumps({
+                    "turn": idx,
+                    "ts": int(time.time()),
+                    "audio": os.path.basename(audio_path),
+                    "transcript": transcript,
+                    "response": response,
+                }, ensure_ascii=False) + "\n")
+        except Exception as e:
+            print(f"[session-log] failed to record turn {idx}: {e}")
+
+
 DEFAULT_SYSTEM_PROMPT = (
     "أنت مساعد صوتي ذكي لمنصة مستشار. مهمتك أن تجيب على المستخدم بنبرة "
     "ودودة ومحترفة.\n\n"
@@ -1573,6 +1621,11 @@ async def conversation_ws(ws: WebSocket):
         {"role": "system", "content": DEFAULT_SYSTEM_PROMPT}
     ]
     interrupt_flag = {"value": False}
+    # Allow client to resume by passing ?session_id= — otherwise mint a new one.
+    requested_sid = ws.query_params.get("session_id", "")
+    session_id = requested_sid or f"sess-{int(time.time())}-{uuid.uuid4().hex[:6]}"
+    session_log = SessionLog(session_id)
+    await ws.send_json({"type": "session", "session_id": session_id})
 
     try:
         while True:
@@ -1623,50 +1676,69 @@ async def conversation_ws(ws: WebSocket):
                     await ws.send_json({"type": "error", "message": "audio too short"})
                     continue
 
-                # Preferred path: Gemma 4 sidecar — direct audio → response,
-                # no separate ASR + LLM. Falls back to the VibeVoice-ASR +
-                # Qwen pipeline if the sidecar is unreachable.
-                used_gemma = False
-                if GEMMA4_URL:
-                    try:
-                        gem = await _gemma4_audio_chat(audio_f32_16k, history)
-                        # Surface a placeholder transcript so the UI shows
-                        # "you said …" — Gemma doesn't expose the internal
-                        # transcript, but the response text proves the
-                        # model heard the audio.
-                        await ws.send_json({
-                            "type": "transcript",
-                            "text": "(audio sent directly to Gemma 4)",
-                        })
-                        await _conversation_turn_with_response(
-                            ws, voice_id, language, "[audio]", gem,
-                            history, interrupt_flag,
-                        )
-                        used_gemma = True
-                    except Exception as e:
-                        # Log + fall back. Don't break the conversation.
-                        print(f"[conversation] Gemma 4 failed, falling back: {e}")
+                # Always run VibeVoice-ASR in PARALLEL with Gemma 4. Two
+                # different models on different memory regions of the same GPU
+                # ⇒ they overlap with no extra wall-clock cost, and we get
+                # back BOTH the real transcript (for the UI + chat history)
+                # AND Gemma's response in one round-trip. If Gemma 4 fails,
+                # the transcript is already in hand and we hand off to Qwen.
+                audio_f32_24k = librosa.resample(
+                    audio_f32_16k, orig_sr=INPUT_SAMPLE_RATE,
+                    target_sr=ASR_SAMPLE_RATE,
+                )
 
-                if not used_gemma:
-                    # Fallback: original ASR + LLM pipeline.
-                    audio_f32_24k = librosa.resample(
-                        audio_f32_16k, orig_sr=INPUT_SAMPLE_RATE,
-                        target_sr=ASR_SAMPLE_RATE,
-                    )
-                    loop = asyncio.get_event_loop()
+                async def _run_asr():
                     assert _asr_lock is not None
                     async with _serialize(_asr_lock, _asr_stats):
-                        stt_result = await loop.run_in_executor(
+                        loop = asyncio.get_event_loop()
+                        return await loop.run_in_executor(
                             None, _asr_transcribe_sync, audio_f32_24k
                         )
-                    user_text_raw = stt_result["text"].strip()
-                    user_text = _clean_asr_text_for_llm(user_text_raw)
-                    await ws.send_json({"type": "transcript", "text": user_text_raw})
-                    if not user_text:
-                        continue
-                    await _conversation_turn(
+
+                async def _run_gemma():
+                    if not GEMMA4_URL:
+                        return None
+                    try:
+                        return await _gemma4_audio_chat(audio_f32_16k, history)
+                    except Exception as e:
+                        print(f"[conversation] Gemma 4 failed: {e}")
+                        return None
+
+                # Save the audio to disk for recovery / replay.
+                turn_idx = session_log.next_turn_idx()
+                audio_path = session_log.save_audio(turn_idx, audio_f32_16k, INPUT_SAMPLE_RATE)
+
+                asr_task = asyncio.create_task(_run_asr())
+                gemma_task = asyncio.create_task(_run_gemma())
+                stt_result, gemma_response = await asyncio.gather(asr_task, gemma_task)
+
+                user_text_raw = (stt_result.get("text") or "").strip()
+                user_text = _clean_asr_text_for_llm(user_text_raw)
+                # Send the REAL transcript to the UI so the user can verify
+                # what was heard before the model replied.
+                await ws.send_json({"type": "transcript", "text": user_text_raw})
+
+                if not user_text:
+                    # Couldn't make sense of the audio at all
+                    session_log.record_turn(turn_idx, audio_path, "", "")
+                    continue
+
+                if gemma_response and _looks_arabic(gemma_response):
+                    # Gemma succeeded — use its response, but store the REAL
+                    # transcript in history (so the next turn's context is
+                    # actual text, not a "[audio]" placeholder).
+                    session_log.record_turn(turn_idx, audio_path, user_text_raw, gemma_response)
+                    await _conversation_turn_with_response(
+                        ws, voice_id, language, user_text, gemma_response,
+                        history, interrupt_flag,
+                    )
+                else:
+                    # Gemma failed or drifted — fall back to Qwen using the
+                    # already-computed transcript.
+                    response_text = await _conversation_turn(
                         ws, voice_id, language, user_text, history, interrupt_flag,
                     )
+                    session_log.record_turn(turn_idx, audio_path, user_text_raw, response_text or "")
     except WebSocketDisconnect:
         pass
     except Exception as e:
@@ -1825,6 +1897,7 @@ async def _conversation_turn(
         "total_ms": round(total_ms),
         "chunks": chunks,
     })
+    return response_text
 
 
 @app.websocket("/v1/text-to-speech/{voice_id}/ws")
