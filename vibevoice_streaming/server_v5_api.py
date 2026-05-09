@@ -390,12 +390,66 @@ def _chunk_to_pcm_bytes(audio_tensor: torch.Tensor) -> bytes:
 # ============================================================
 # Generation (shared between non-streaming + streaming)
 # ============================================================
+def _format_speaker_text(text: str, speaker: int = 1) -> str:
+    """Format text so VibeVoice reads ALL lines, not just the first.
+
+    VibeVoice expects each "turn" to begin with `Speaker N:`. If the user
+    pastes a multi-paragraph article like:
+
+        السلام عليكم.
+        هذه الفقرة الثانية.
+        هذه الفقرة الثالثة.
+
+    a naive `"Speaker 1: " + text` only marks the first line, and the
+    model often stops generating after the first paragraph. Prefixing
+    every non-empty line keeps long-form articles flowing through.
+    """
+    raw_lines = text.replace("\r\n", "\n").split("\n")
+    cleaned = [ln.strip() for ln in raw_lines]
+    cleaned = [ln for ln in cleaned if ln]
+    if not cleaned:
+        return f"Speaker {speaker}: "
+    return "\n".join(f"Speaker {speaker}: {ln}" for ln in cleaned)
+
+
+def _trim_audio_tail(
+    audio: np.ndarray,
+    sr: int = SAMPLE_RATE,
+    top_db: int = 35,
+    pad_s: float = 0.15,
+    min_keep_s: float = 0.5,
+) -> np.ndarray:
+    """Trim trailing silence/noise that VibeVoice sometimes appends.
+
+    The diffusion head occasionally emits low-energy hiss or stray sound
+    after the actual content ends. We find the last "voiced" interval
+    above `top_db` below peak and cut just past it (with a small pad so
+    the natural decay isn't clipped).
+    """
+    if len(audio) < int(sr * min_keep_s):
+        return audio
+    try:
+        intervals = librosa.effects.split(
+            audio, top_db=top_db, frame_length=2048, hop_length=512
+        )
+        if len(intervals) == 0:
+            return audio
+        last_end = int(intervals[-1][1])
+        end = min(len(audio), last_end + int(pad_s * sr))
+        # Sanity: never trim more than half the clip.
+        if end < int(0.5 * len(audio)):
+            return audio
+        return audio[:end]
+    except Exception:
+        return audio
+
+
 def _generate_full(text: str, voice_id: str, settings: Optional[VoiceSettings] = None) -> np.ndarray:
-    """Synchronous full generation, returns float32 audio."""
+    """Synchronous full generation, returns float32 audio (tail-trimmed)."""
     profile = _get_voice(voice_id)
     if settings:
         model.set_ddpm_inference_steps(num_steps=settings.diffusion_steps)
-    speaker_text = "Speaker 1: " + text
+    speaker_text = _format_speaker_text(text)
     inputs = processor(
         text=[speaker_text],
         voice_samples=[[profile["ref_audio_np"]]],
@@ -411,7 +465,8 @@ def _generate_full(text: str, voice_id: str, settings: Optional[VoiceSettings] =
             generation_config={"do_sample": False, "num_beams": 1},
             verbose=False, show_progress_bar=False,
         )
-    return out.speech_outputs[0].cpu().float().numpy().flatten()
+    audio = out.speech_outputs[0].cpu().float().numpy().flatten()
+    return _trim_audio_tail(audio)
 
 
 def _generate_dialogue(
@@ -459,17 +514,36 @@ def _generate_dialogue(
             verbose=False,
             show_progress_bar=False,
         )
-    return out.speech_outputs[0].cpu().float().numpy().flatten()
+    audio = out.speech_outputs[0].cpu().float().numpy().flatten()
+    return _trim_audio_tail(audio)
+
+
+def _np_to_pcm_bytes(audio_np: np.ndarray) -> bytes:
+    """Float32 → PCM16LE bytes. Mirrors `_chunk_to_pcm_bytes` for numpy arrays."""
+    a = (np.clip(audio_np, -1.0, 1.0) * 32767).astype(np.int16)
+    return a.tobytes()
+
+
+# Number of chunks to buffer at the tail before yielding. When the stream
+# ends we run librosa-based silence detection on this buffer to clip any
+# hallucinated noise the diffusion head emits after the actual content.
+# 3 chunks ≈ 0.6-1.2 s — enough for a clean trim without hurting TTFA.
+_TAIL_BUFFER_CHUNKS = 3
 
 
 async def _generate_stream(text: str, voice_id: str, settings: Optional[VoiceSettings] = None) -> AsyncGenerator[bytes, None]:
-    """Async generator yielding PCM16LE chunks as the model produces them."""
+    """Async generator yielding PCM16LE chunks as the model produces them.
+
+    Buffers the last few chunks so we can trim noise/hiss the model
+    sometimes emits after the actual content. Adds <1 s to perceived
+    end-of-utterance latency but eliminates the "wind/music" tail.
+    """
     from vibevoice.modular.streamer import AudioStreamer
 
     profile = _get_voice(voice_id)
     if settings:
         model.set_ddpm_inference_steps(num_steps=settings.diffusion_steps)
-    speaker_text = "Speaker 1: " + text
+    speaker_text = _format_speaker_text(text)
     inputs = processor(
         text=[speaker_text],
         voice_samples=[[profile["ref_audio_np"]]],
@@ -498,14 +572,26 @@ async def _generate_stream(text: str, voice_id: str, settings: Optional[VoiceSet
 
     threading.Thread(target=run_generate, daemon=True).start()
     loop = asyncio.get_event_loop()
+    tail_buffer: list[torch.Tensor] = []
+
     while True:
         try:
             chunk = await loop.run_in_executor(None, lambda: streamer.audio_queues[0].get(timeout=30.0))
         except Exception:
             break
         if chunk is None or chunk is streamer.stop_signal:
+            # End of stream — run tail-trim across the buffered chunks.
+            if tail_buffer:
+                tail_np = np.concatenate([
+                    t.detach().cpu().float().numpy().flatten() for t in tail_buffer
+                ])
+                trimmed = _trim_audio_tail(tail_np)
+                if len(trimmed) > 0:
+                    yield _np_to_pcm_bytes(trimmed)
             break
-        yield _chunk_to_pcm_bytes(chunk)
+        tail_buffer.append(chunk)
+        if len(tail_buffer) > _TAIL_BUFFER_CHUNKS:
+            yield _chunk_to_pcm_bytes(tail_buffer.pop(0))
 
 
 # ============================================================
