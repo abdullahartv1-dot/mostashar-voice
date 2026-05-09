@@ -1179,10 +1179,24 @@ def _whisper_transcribe_sync(audio_f32_16k: np.ndarray) -> str:
         "no_repeat_ngram_size": 3,     # cuts the rare repetition loop
     }
     if WHISPER_LANGUAGE and WHISPER_LANGUAGE.lower() != "auto":
-        # Force language → no auto-detect mistakes. Saudi/Egyptian/
-        # Lebanese all decode under "ar" without dialect-specific tags.
+        # Belt-and-braces language locking. Whisper occasionally emits
+        # English / Persian / Urdu when the speaker uses heavy dialect
+        # — even with `language="ar"` set — because the language token
+        # only biases the first decoded token, not the whole stream.
+        # We additionally compute `forced_decoder_ids` which pins the
+        # language + task tokens at fixed positions of the decoder
+        # input, making non-Arabic decoding effectively impossible.
         gen_kwargs["language"] = WHISPER_LANGUAGE
         gen_kwargs["task"] = "transcribe"
+        try:
+            forced = whisper_processor.get_decoder_prompt_ids(
+                language=WHISPER_LANGUAGE, task="transcribe",
+            )
+            gen_kwargs["forced_decoder_ids"] = forced
+        except Exception:
+            # Older transformers builds may not expose this helper —
+            # the `language` kwarg above still applies.
+            pass
     with torch.no_grad():
         gen_ids = whisper_model.generate(feats, **gen_kwargs)
     text = whisper_processor.batch_decode(gen_ids, skip_special_tokens=True)[0]
