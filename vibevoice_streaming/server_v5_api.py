@@ -171,19 +171,39 @@ DEFAULT_SYSTEM_PROMPT = (
 )
 
 
-# Words we strip from ASR output before passing to the LLM. VibeVoice-ASR
-# emits these structural markers in transcribed segments and they confuse
-# the LM (it sees them as part of the user's intent).
+# Structural markers VibeVoice-ASR emits inside transcripts. We strip
+# them before:
+#   - sending the transcript to the LLM (otherwise it treats them as
+#     part of the user's intent and replies in Chinese on the long ones)
+#   - showing the transcript in the UI (the user just wants to see what
+#     was said, not the model's internal annotations)
 _ASR_NOISE_TOKENS_RE = re.compile(
-    r"\[(?:silence|Silence|SILENCE|noise|Noise|music|Music)\]", re.IGNORECASE
+    r"\[\s*(?:silence|noise|music|unintelligible(?:\s+speech)?|"
+    r"applause|laughter|background\s+(?:noise|music)|crosstalk|inaudible)"
+    r"\s*\]",
+    re.IGNORECASE,
 )
 
 
-def _clean_asr_text_for_llm(text: str) -> str:
-    """Strip ASR structural markers + collapse whitespace before LLM call."""
+def _clean_asr_text_for_display(text: str) -> str:
+    """Remove ASR-only markers but keep all transcribed words. Suitable
+    for both the UI transcript bubble and the LLM input."""
     cleaned = _ASR_NOISE_TOKENS_RE.sub(" ", text)
     cleaned = re.sub(r"\s+", " ", cleaned).strip()
     return cleaned
+
+
+# Backwards-compat alias for the LLM-cleanup call sites.
+def _clean_asr_text_for_llm(text: str) -> str:
+    return _clean_asr_text_for_display(text)
+
+
+# VibeVoice-ASR's streaming code path requires extra kwargs that our
+# patched community fork doesn't accept (raises
+# "VibeVoiceAcousticTokenizerModel.encode() got an unexpected keyword
+# argument"). The streaming threshold is 60 s, so we cap conversation
+# audio just below that to stay on the safe non-streaming path.
+ASR_MAX_AUDIO_SAMPLES = int(55 * ASR_SAMPLE_RATE)
 
 
 # Detect script of LLM output. If the response is dominated by non-Arabic
@@ -1689,11 +1709,24 @@ async def conversation_ws(ws: WebSocket):
 
                 async def _run_asr():
                     assert _asr_lock is not None
-                    async with _serialize(_asr_lock, _asr_stats):
-                        loop = asyncio.get_event_loop()
-                        return await loop.run_in_executor(
-                            None, _asr_transcribe_sync, audio_f32_24k
-                        )
+                    # Cap to <60 s so we never hit the streaming code path
+                    # in the patched community fork (which crashes with
+                    # "unexpected keyword argument"). Keeps the LATEST
+                    # window so the user still sees what they just said.
+                    asr_audio = audio_f32_24k
+                    if len(asr_audio) > ASR_MAX_AUDIO_SAMPLES:
+                        asr_audio = asr_audio[-ASR_MAX_AUDIO_SAMPLES:]
+                    try:
+                        async with _serialize(_asr_lock, _asr_stats):
+                            loop = asyncio.get_event_loop()
+                            return await loop.run_in_executor(
+                                None, _asr_transcribe_sync, asr_audio
+                            )
+                    except Exception as e:
+                        # ASR is best-effort here — Gemma 4 carries the
+                        # actual response. Don't break the conversation.
+                        print(f"[asr] failed in conversation: {e}")
+                        return {"text": "", "segments": []}
 
                 async def _run_gemma():
                     if not GEMMA4_URL:
@@ -1713,10 +1746,12 @@ async def conversation_ws(ws: WebSocket):
                 stt_result, gemma_response = await asyncio.gather(asr_task, gemma_task)
 
                 user_text_raw = (stt_result.get("text") or "").strip()
-                user_text = _clean_asr_text_for_llm(user_text_raw)
-                # Send the REAL transcript to the UI so the user can verify
-                # what was heard before the model replied.
-                await ws.send_json({"type": "transcript", "text": user_text_raw})
+                user_text = _clean_asr_text_for_display(user_text_raw)
+                # Show the CLEANED transcript in the UI — the [Silence] /
+                # [Unintelligible Speech] markers are internal ASR noise
+                # and confuse / clutter the chat bubble.
+                if user_text:
+                    await ws.send_json({"type": "transcript", "text": user_text})
 
                 if not user_text:
                     # Couldn't make sense of the audio at all
