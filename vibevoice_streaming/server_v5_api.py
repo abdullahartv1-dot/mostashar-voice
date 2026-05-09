@@ -95,6 +95,16 @@ LLM_ENABLED = os.environ.get("MV_LLM_ENABLED", "1") not in ("0", "false", "False
 # understanding so no transcript drift). Set MV_GEMMA4_URL="" to force
 # the fallback path.
 GEMMA4_URL = os.environ.get("MV_GEMMA4_URL", "http://127.0.0.1:8082")
+# OpenVoice v2 sidecar — applies a clarity-of-articulation donor's
+# acoustic characteristics to an uploaded reference at clone time. Set
+# MV_OPENVOICE_URL="" to disable (clone uses the raw upload as-is).
+# See vibevoice_streaming/openvoice_server.py for the sidecar.
+OPENVOICE_URL = os.environ.get("MV_OPENVOICE_URL", "http://127.0.0.1:8083")
+OPENVOICE_DONOR = os.environ.get("MV_OPENVOICE_DONOR", "hamed_saudi")
+# How long to wait for the sidecar before falling back to the raw upload.
+# Cold-path enhancement on first call can be ~10 s (donor SE extraction);
+# warm path is 3-6 s. 30 s is a safe ceiling.
+OPENVOICE_TIMEOUT_S = float(os.environ.get("MV_OPENVOICE_TIMEOUT_S", "30"))
 DIFFUSION_STEPS = int(os.environ.get("MV_DIFF_STEPS", "15"))
 CFG_SCALE = float(os.environ.get("MV_CFG", "1.8"))
 SAMPLE_RATE = 24000
@@ -357,11 +367,36 @@ class VoicesListResponse(BaseModel):
     voices: list[VoiceMeta]
 
 
+class CloneEnhancementMetrics(BaseModel):
+    """Spectral characteristics of the audio at each stage of the
+    enhancement pipeline. Useful for showing a before/after table on
+    the clone-confirmation UI so the user can see — numerically — that
+    the new reference is cleaner than what they uploaded."""
+    donor: Optional[dict] = None
+    target: Optional[dict] = None
+    enhanced: Optional[dict] = None
+
+
+class CloneEnhancement(BaseModel):
+    """Subset of meta returned alongside CloneResponse when the clone
+    actually went through the OpenVoice sidecar. Absent / null when the
+    sidecar was disabled or unreachable (the clone still succeeded
+    using the raw upload — but the user gets to know why)."""
+    donor_id: str
+    gen_ms: int
+    metrics: Optional[CloneEnhancementMetrics] = None
+
+
 class CloneResponse(BaseModel):
     voice_id: str
     name: str
     language: str
     dur_s: float
+    # Whether the canonical on-disk reference went through the
+    # articulation-clarity enhancement step. False ≠ failure: it just
+    # means the raw upload is what VibeVoice will clone from.
+    enhanced: bool = False
+    enhancement: Optional[CloneEnhancement] = None
 
 
 class ModelInfo(BaseModel):
@@ -370,6 +405,18 @@ class ModelInfo(BaseModel):
     languages: list[str]
     can_clone: bool
     description: str
+
+
+class SidecarHealth(BaseModel):
+    """Reachability snapshot of an external sidecar (Gemma 4, OpenVoice).
+    `reachable=True` ⇔ /health responded 200 within 2 s. `loaded` reflects
+    the sidecar's own readiness to serve traffic (e.g. donor cached for
+    OpenVoice, model loaded for Gemma)."""
+    url: str
+    reachable: bool = False
+    loaded: bool = False
+    detail: Optional[dict] = None
+    error: Optional[str] = None
 
 
 class HealthResponse(BaseModel):
@@ -383,6 +430,11 @@ class HealthResponse(BaseModel):
     asr_model: Optional[str] = None
     llm_loaded: bool = False
     llm_model: Optional[str] = None
+    # Sidecars are optional dependencies; their absence degrades but
+    # doesn't break the main service (cloning falls back to raw upload,
+    # conversations fall back to ASR + Qwen).
+    gemma4: Optional[SidecarHealth] = None
+    openvoice: Optional[SidecarHealth] = None
 
 
 class TranscriptSegment(BaseModel):
@@ -484,14 +536,102 @@ def _get_voice(voice_id: str) -> dict:
     raise HTTPException(status_code=404, detail={"error": {"code": "voice_not_found", "message": f"voice {voice_id} not found", "status": 404}})
 
 
-def _save_voice(voice_id: str, audio_np: np.ndarray, name: str, language: str) -> dict:
+def _raw_wav_path(voice_id: str) -> str:
+    """Path where we keep the user's original upload — preserved verbatim
+    so we can re-run enhancement (e.g. with a different donor) later
+    without asking the user to re-upload."""
+    return os.path.join(VOICES_DIR, f"{voice_id}.raw.wav")
+
+
+async def _save_voice(
+    voice_id: str,
+    audio_np: np.ndarray,
+    name: str,
+    language: str,
+    enhance: bool = True,
+    donor: Optional[str] = None,
+) -> dict:
+    """Persist a cloned voice. By default runs the OpenVoice enhancement
+    pipeline so the on-disk reference has clarity-of-articulation
+    transferred from a donor (default: hamed_saudi). The raw upload is
+    *also* saved alongside (`{id}.raw.wav`) so we can re-enhance later
+    or fall back to it if the user prefers their original.
+
+    `enhance=False` disables the sidecar call (e.g. for premade voices
+    that are already canonical).
+    """
     if len(audio_np) > 30 * SAMPLE_RATE:
         audio_np = audio_np[: 30 * SAMPLE_RATE]
-    # NOTE: we deliberately do NOT denoise references at upload time —
-    # earlier experiments with noisereduce on edge-tts MP3 sources
-    # *amplified* HF artifacts. Speech-band content is preserved best by
-    # leaving the reference untouched and applying a surgical low-pass on
-    # the model's *output* instead (see _lowpass_clean / _StreamingLowpass).
+
+    # 1. Save the raw upload first — this is the irreversible source of
+    # truth and must succeed before we attempt anything else.
+    sf.write(_raw_wav_path(voice_id), audio_np, SAMPLE_RATE)
+
+    # 2. Optional enhancement via OpenVoice v2. Falls back to raw on
+    # any failure so cloning never fails because the sidecar is down.
+    enhancement: Optional[dict] = None
+    canonical_audio = audio_np
+    if enhance and OPENVOICE_URL:
+        try:
+            enhancement = await _openvoice_enhance_reference(
+                audio_np, SAMPLE_RATE, donor=donor,
+            )
+        except Exception as e:
+            # Defensive — _openvoice_enhance_reference already swallows
+            # network/HTTP errors and returns None, but a programming bug
+            # shouldn't kill the whole clone.
+            print(f"[voices] enhancement raised: {e}")
+            enhancement = None
+        if enhancement is not None:
+            canonical_audio = enhancement["audio_np"]
+
+    # 3. Canonical reference VibeVoice will clone from. This is either
+    # the enhanced version (preferred) or the raw upload (fallback).
+    # NOTE: we deliberately do NOT denoise references — earlier
+    # experiments with noisereduce on edge-tts MP3 sources *amplified*
+    # HF artifacts. Speech-band content is preserved best by leaving the
+    # reference untouched and applying a surgical low-pass on the
+    # model's *output* (see _lowpass_clean / _StreamingLowpass).
+    sf.write(_wav_path(voice_id), canonical_audio, SAMPLE_RATE)
+
+    meta = {
+        "voice_id": voice_id,
+        "name": name,
+        "language": language,
+        "created_at": int(time.time()),
+        "dur_s": len(canonical_audio) / SAMPLE_RATE,
+        "raw_dur_s": len(audio_np) / SAMPLE_RATE,
+        "enhanced": enhancement is not None,
+        "enhancement": (
+            {
+                "donor_id": enhancement["donor_id"],
+                "gen_ms": enhancement["gen_ms"],
+                "metrics": enhancement.get("metrics"),
+            }
+            if enhancement else None
+        ),
+    }
+    with open(_meta_path(voice_id), "w", encoding="utf-8") as f:
+        json.dump(meta, f, ensure_ascii=False, indent=2)
+    profile = {
+        "voice_id": voice_id,
+        "ref_audio_np": canonical_audio,
+        "ref_audio_dur_s": meta["dur_s"],
+        "name": name,
+        "language": language,
+        "created_at": meta["created_at"],
+        "enhanced": meta["enhanced"],
+    }
+    voice_profiles[voice_id] = profile
+    return profile
+
+
+def _save_voice_sync(voice_id: str, audio_np: np.ndarray, name: str, language: str) -> dict:
+    """Backwards-compat synchronous wrapper for callers that don't sit
+    inside a request handler (e.g. seed_premade_voices.py). Always skips
+    enhancement because seeding runs before the sidecar is available."""
+    if len(audio_np) > 30 * SAMPLE_RATE:
+        audio_np = audio_np[: 30 * SAMPLE_RATE]
     sf.write(_wav_path(voice_id), audio_np, SAMPLE_RATE)
     meta = {
         "voice_id": voice_id,
@@ -499,6 +639,7 @@ def _save_voice(voice_id: str, audio_np: np.ndarray, name: str, language: str) -
         "language": language,
         "created_at": int(time.time()),
         "dur_s": len(audio_np) / SAMPLE_RATE,
+        "enhanced": False,
     }
     with open(_meta_path(voice_id), "w", encoding="utf-8") as f:
         json.dump(meta, f, ensure_ascii=False, indent=2)
@@ -509,6 +650,7 @@ def _save_voice(voice_id: str, audio_np: np.ndarray, name: str, language: str) -
         "name": name,
         "language": language,
         "created_at": meta["created_at"],
+        "enhanced": False,
     }
     voice_profiles[voice_id] = profile
     return profile
@@ -893,6 +1035,54 @@ def _asr_transcribe_sync(audio_np: np.ndarray, hotwords: Optional[str] = None) -
     return {"text": full_text, "segments": segments, "generation_s": gen_s, "raw": raw}
 
 
+# Window length for chunked ASR. The streaming path crashes >60s, so we
+# stay safely under that. Picked 50s to leave headroom and to fit several
+# windows for a typical 2-3 min utterance.
+ASR_WINDOW_SAMPLES = int(50 * ASR_SAMPLE_RATE)
+# Drop trailing windows shorter than this (sub-half-second is almost
+# always silence or breath, never useful speech).
+ASR_MIN_TAIL_SAMPLES = int(0.5 * ASR_SAMPLE_RATE)
+
+
+async def _asr_long_audio(audio_f32_24k: np.ndarray) -> str:
+    """Transcribe audio of any duration by sliding 50s windows.
+
+    Replaces the old behaviour of ``audio[-55s:]`` which silently dropped
+    the first ~95 s of a 2:30 turn. Each window is fed to the safe non-
+    streaming ASR path; outputs are concatenated with a single space.
+
+    No overlap is used — VibeVoice-ASR emits well-formed sentences and the
+    extra cost of dedup-on-overlap (text similarity at boundaries) isn't
+    worth the marginal correctness gain. Word loss at boundaries is rare
+    because real speech has frequent natural silences.
+    """
+    if len(audio_f32_24k) <= ASR_WINDOW_SAMPLES:
+        # Short enough — single pass.
+        assert _asr_lock is not None
+        async with _serialize(_asr_lock, _asr_stats):
+            loop = asyncio.get_event_loop()
+            stt = await loop.run_in_executor(
+                None, _asr_transcribe_sync, audio_f32_24k
+            )
+        return (stt.get("text") or "").strip()
+
+    parts: list[str] = []
+    for start in range(0, len(audio_f32_24k), ASR_WINDOW_SAMPLES):
+        chunk = audio_f32_24k[start : start + ASR_WINDOW_SAMPLES]
+        if len(chunk) < ASR_MIN_TAIL_SAMPLES:
+            continue  # tail too short — skip
+        assert _asr_lock is not None
+        async with _serialize(_asr_lock, _asr_stats):
+            loop = asyncio.get_event_loop()
+            stt = await loop.run_in_executor(
+                None, _asr_transcribe_sync, chunk
+            )
+        text = (stt.get("text") or "").strip()
+        if text:
+            parts.append(text)
+    return " ".join(parts).strip()
+
+
 # ============================================================
 # LLM (Qwen2.5-Instruct) — used by the conversation endpoint
 # ============================================================
@@ -1081,7 +1271,10 @@ async def lifespan(app: FastAPI):
 
     if "default" not in voice_profiles and os.path.exists(DEFAULT_REF):
         audio_np, _ = librosa.load(DEFAULT_REF, sr=SAMPLE_RATE)
-        _save_voice("default", audio_np, "Default", "ar")
+        # Sync seed at startup — the OpenVoice sidecar may not be up yet
+        # and `default` is itself the gold reference, no enhancement
+        # would help anyway.
+        _save_voice_sync("default", audio_np, "Default", "ar")
 
     print(f"[startup] voices loaded: {len(voice_profiles)} ({list(voice_profiles.keys())[:5]}...)")
     print(f"[startup] auth: {'enabled' if API_KEY else 'DISABLED (set MV_API_KEY env to enable)'}")
@@ -1191,8 +1384,38 @@ app.add_middleware(
 # ============================================================
 # Health
 # ============================================================
+async def _probe_sidecar(url: str, name: str) -> SidecarHealth:
+    """Hit a sidecar's /health endpoint with a tight timeout. Used only
+    by /v1/health so dashboards / probes can see the full system state
+    in one call."""
+    if not url:
+        return SidecarHealth(url=url, reachable=False, error="disabled")
+    import httpx
+    try:
+        async with httpx.AsyncClient(timeout=2.0) as client:
+            r = await client.get(f"{url}/health")
+        if r.status_code != 200:
+            return SidecarHealth(url=url, reachable=True, loaded=False,
+                                 error=f"status={r.status_code}")
+        j = r.json()
+        return SidecarHealth(
+            url=url,
+            reachable=True,
+            loaded=bool(j.get("loaded")),
+            detail=j,
+        )
+    except Exception as e:
+        return SidecarHealth(url=url, reachable=False, error=str(e)[:200])
+
+
 @app.get("/v1/health", response_model=HealthResponse, tags=["misc"])
 async def health():
+    # Probe both sidecars in parallel — keeps the /health round-trip
+    # under ~2.1 s even if one is unreachable.
+    gemma_h, ov_h = await asyncio.gather(
+        _probe_sidecar(GEMMA4_URL, "gemma4"),
+        _probe_sidecar(OPENVOICE_URL, "openvoice"),
+    )
     return HealthResponse(
         status="ok",
         model=MODEL_NAME,
@@ -1204,6 +1427,8 @@ async def health():
         asr_model=ASR_MODEL_NAME if asr_model is not None else None,
         llm_loaded=llm_model is not None,
         llm_model=LLM_MODEL_NAME if llm_model is not None else None,
+        gemma4=gemma_h,
+        openvoice=ov_h,
     )
 
 
@@ -1358,8 +1583,13 @@ async def voice_preview(voice_id: str, _=Depends(require_api_key)):
 async def add_voice(
     name: str = Form(..., min_length=1, max_length=80),
     language: str = Form("ar", pattern="^(ar|en|multi)$"),
+    # start_s / end_s are now ADVISORY. The new browser path trims the
+    # audio in-place before uploading, so the file we receive here is
+    # already exactly the segment the user picked. We honour explicit
+    # nonzero values for backwards compatibility with the legacy clone
+    # flow that uploaded entire files and asked us to slice them.
     start_s: float = Form(0.0, ge=0),
-    end_s: float = Form(30.0, gt=0, le=300),
+    end_s: float = Form(0.0, ge=0, le=300),
     files: list[UploadFile] = File(..., description="One audio file (mp3/wav/m4a/webm)"),
     _=Depends(require_api_key),
 ):
@@ -1367,25 +1597,176 @@ async def add_voice(
         raise HTTPException(400, "no audio file provided")
     audio = files[0]
     audio_bytes = await audio.read()
+    # Hard cap on uploaded payload. We split this into two budgets:
+    #   - Pre-trimmed (browser path)  → tiny, ~470 KB for 10 s of WAV
+    #   - Raw (server-side fallback)  → can be 100 MB for an hour-long
+    #     MP3 the browser couldn't decode locally
+    # We default to 150 MB which covers ~2 h of 192 kbps MP3. Override
+    # via MV_VOICES_ADD_MAX_BYTES if you need more.
+    MAX_BYTES = int(os.environ.get(
+        "MV_VOICES_ADD_MAX_BYTES", str(150 * 1024 * 1024)))
+    if len(audio_bytes) > MAX_BYTES:
+        raise HTTPException(
+            413,
+            f"upload is {len(audio_bytes) // (1024 * 1024)} MB but limit is "
+            f"{MAX_BYTES // (1024 * 1024)} MB. Convert to a smaller file or "
+            f"trim it before uploading.",
+        )
+
+    # Memory-efficient decode path: when the client passes start_s/end_s
+    # (i.e. server-side fallback, file too long for browser decode), we
+    # ask librosa to load ONLY the requested seconds. That way a 100 MB
+    # MP3 doesn't have to fully decompress into ~1 GB of float32 just so
+    # we can keep 240 KB of it.
+    server_side_trim = end_s > 0 and end_s > start_s
     try:
         buf = io.BytesIO(audio_bytes)
-        audio_np, _sr = librosa.load(buf, sr=SAMPLE_RATE)
+        if server_side_trim:
+            # Hard-cap the requested slice at 30 s so a buggy client
+            # can't cause us to load arbitrary amounts of audio.
+            slice_dur = min(end_s - start_s, 30.0)
+            audio_np, _sr = librosa.load(
+                buf, sr=SAMPLE_RATE,
+                offset=max(0.0, float(start_s)),
+                duration=float(slice_dur),
+            )
+        else:
+            # Trusted small upload (already trimmed in browser). Decode
+            # whole thing — fast and bounded by MAX_BYTES anyway.
+            audio_np, _sr = librosa.load(buf, sr=SAMPLE_RATE)
     except Exception as e:
         raise HTTPException(400, f"failed to decode audio: {e}")
 
-    s0 = max(0, int(start_s * SAMPLE_RATE))
-    s1 = min(len(audio_np), int(end_s * SAMPLE_RATE))
-    if s1 - s0 < 3 * SAMPLE_RATE:
-        raise HTTPException(400, "selection must be at least 3 seconds")
-    audio_np = audio_np[s0:s1]
+    if len(audio_np) < 3 * SAMPLE_RATE:
+        raise HTTPException(400, "audio segment must be at least 3 seconds")
     if len(audio_np) > 30 * SAMPLE_RATE:
         audio_np = audio_np[: 30 * SAMPLE_RATE]
 
     voice_id = f"{_slugify(name)}-{uuid.uuid4().hex[:6]}"
-    profile = _save_voice(voice_id, audio_np, name, language)
+    profile = await _save_voice(voice_id, audio_np, name, language)
+    # Read back the meta we just wrote — _save_voice persists the full
+    # enhancement breakdown there, easier than threading return values.
+    try:
+        with open(_meta_path(voice_id), "r", encoding="utf-8") as f:
+            meta_back = json.load(f)
+    except Exception:
+        meta_back = {}
+    enh_meta = meta_back.get("enhancement")
     return CloneResponse(
         voice_id=voice_id, name=name, language=language,
         dur_s=round(profile["ref_audio_dur_s"], 2),
+        enhanced=bool(profile.get("enhanced")),
+        enhancement=(
+            CloneEnhancement(
+                donor_id=enh_meta["donor_id"],
+                gen_ms=int(enh_meta.get("gen_ms") or 0),
+                metrics=CloneEnhancementMetrics(**(enh_meta.get("metrics") or {})),
+            )
+            if enh_meta else None
+        ),
+    )
+
+
+@app.post("/v1/voices/{voice_id}/enhance", response_model=CloneResponse, tags=["voices"])
+async def enhance_voice(
+    voice_id: str,
+    donor: Optional[str] = Form(
+        None,
+        description="Override the default clarity donor (e.g. 'hamed_saudi'). "
+                    "Defaults to MV_OPENVOICE_DONOR.",
+    ),
+    _=Depends(require_api_key),
+):
+    """Re-run the OpenVoice clarity-of-articulation enhancement on an
+    existing voice. Useful for:
+      - voices created before the sidecar existed
+      - voices created while the sidecar was down
+      - trying a different clarity donor
+
+    The original raw upload is read from `{voice_id}.raw.wav` if it
+    exists, else from the canonical `{voice_id}.wav` (in which case the
+    enhancement re-applies on top of whatever's there — usually a no-op
+    quality-wise but harmless).
+    """
+    if not OPENVOICE_URL:
+        raise HTTPException(503, "OpenVoice sidecar disabled (MV_OPENVOICE_URL is empty)")
+    profile = _get_voice(voice_id)
+
+    raw_path = _raw_wav_path(voice_id)
+    src_path = raw_path if os.path.exists(raw_path) else _wav_path(voice_id)
+    audio_np, _ = librosa.load(src_path, sr=SAMPLE_RATE)
+
+    # Reuse the canonical save helper so the on-disk shape stays
+    # consistent across upload-time and re-enhance.
+    profile = await _save_voice(
+        voice_id, audio_np,
+        name=profile.get("name") or voice_id,
+        language=profile.get("language") or "ar",
+        donor=donor,
+    )
+
+    try:
+        with open(_meta_path(voice_id), "r", encoding="utf-8") as f:
+            meta_back = json.load(f)
+    except Exception:
+        meta_back = {}
+    enh_meta = meta_back.get("enhancement")
+    return CloneResponse(
+        voice_id=voice_id,
+        name=profile.get("name") or voice_id,
+        language=profile.get("language") or "ar",
+        dur_s=round(profile["ref_audio_dur_s"], 2),
+        enhanced=bool(profile.get("enhanced")),
+        enhancement=(
+            CloneEnhancement(
+                donor_id=enh_meta["donor_id"],
+                gen_ms=int(enh_meta.get("gen_ms") or 0),
+                metrics=CloneEnhancementMetrics(**(enh_meta.get("metrics") or {})),
+            )
+            if enh_meta else None
+        ),
+    )
+
+
+@app.post("/v1/voices/{voice_id}/revert-to-raw", response_model=VoiceMeta, tags=["voices"])
+async def revert_voice_to_raw(voice_id: str, _=Depends(require_api_key)):
+    """Restore the user's original upload as the canonical reference.
+
+    Provided as the escape hatch for users who don't like the sound of
+    the enhanced version. Operates on `{voice_id}.raw.wav`; 404s if the
+    voice was created before raw-preservation was added.
+    """
+    raw_path = _raw_wav_path(voice_id)
+    if not os.path.exists(raw_path):
+        raise HTTPException(
+            404,
+            f"raw upload not found for voice {voice_id} — likely created "
+            "before raw-preservation was added; re-upload to get raw stored.",
+        )
+    audio_np, _ = librosa.load(raw_path, sr=SAMPLE_RATE)
+    sf.write(_wav_path(voice_id), audio_np, SAMPLE_RATE)
+    # Update meta to flag enhancement OFF so the UI shows the right state.
+    mp = _meta_path(voice_id)
+    meta: dict = {}
+    if os.path.exists(mp):
+        try:
+            meta = json.load(open(mp, encoding="utf-8"))
+        except Exception:
+            meta = {}
+    meta["enhanced"] = False
+    meta["enhancement"] = None
+    meta["dur_s"] = len(audio_np) / SAMPLE_RATE
+    with open(mp, "w", encoding="utf-8") as f:
+        json.dump(meta, f, ensure_ascii=False, indent=2)
+    voice_profiles.pop(voice_id, None)
+    p = _load_voice_from_disk(voice_id)
+    return VoiceMeta(
+        voice_id=voice_id,
+        name=p["name"] if p else voice_id,
+        language=p["language"] if p else "ar",
+        dur_s=round(p["ref_audio_dur_s"], 2) if p else 0,
+        preview_url=f"/v1/voices/{voice_id}/preview",
+        created_at=p.get("created_at") if p else None,
     )
 
 
@@ -1915,26 +2296,32 @@ async def conversation_ws(ws: WebSocket):
                     # Update session log row for this turn (rewrite line).
                     session_log.update_turn_transcript(turn_idx, raw_text)
 
-                asyncio.create_task(_bg_asr_and_emit())
-
-                # Critical path: Gemma 4 audio → response → TTS.
-                # IMPORTANT: Gemma 4's audio encoder caps at 30 s. If the
-                # user spoke longer than that, sending the full clip would
-                # silently truncate and we'd lose the LATTER part of their
-                # turn (the most recent context). For long utterances we
-                # fall back to ASR + Qwen which has no per-turn audio cap.
                 audio_dur_s = len(audio_f32_16k) / INPUT_SAMPLE_RATE
+
+                # Critical path branching:
+                #
+                #   audio ≤ 30 s + Gemma 4 available
+                #       → Gemma owns the reply, bg ASR fills the chat bubble
+                #         in parallel (low-latency, transcript is `late=True`).
+                #
+                #   audio  > 30 s  (Gemma's encoder caps there)
+                #       → chunked ASR (sliding 50 s windows) + Qwen.
+                #         NO bg ASR is spawned — otherwise it would race the
+                #         chunked path and the UI would see TWO transcript
+                #         events for the same turn (= duplicate user bubble).
+                #         This branch ALSO fixes the truncation bug where
+                #         the old fallback used `audio[-55 s:]` and silently
+                #         dropped everything before the last 55 s of speech.
                 gemma_response = None
                 if GEMMA4_URL and audio_dur_s <= 30.0:
+                    # Bg ASR is the chat-bubble path; safe to spawn here
+                    # because audio fits in a single ASR window so it
+                    # won't race a windowed sync ASR.
+                    asyncio.create_task(_bg_asr_and_emit())
                     try:
                         gemma_response = await _gemma4_audio_chat(audio_f32_16k, history)
                     except Exception as e:
                         print(f"[conversation] Gemma 4 failed: {e}")
-                elif audio_dur_s > 30.0:
-                    print(
-                        f"[conversation] audio is {audio_dur_s:.1f}s > 30s — "
-                        f"skipping Gemma 4 audio path, will use ASR+Qwen"
-                    )
 
                 if gemma_response and _looks_arabic(gemma_response):
                     # Push placeholder user turn into history so the next
@@ -1947,25 +2334,22 @@ async def conversation_ws(ws: WebSocket):
                         history, interrupt_flag,
                     )
                 else:
-                    # Fallback: Gemma failed/drifted. We need a transcript
-                    # right now, so wait for the bg ASR (it's already
-                    # running) and hand to Qwen.
-                    print("[conversation] Gemma path failed — waiting for ASR")
-                    await asyncio.sleep(0)  # let bg task progress
-                    # Run a synchronous ASR retry to get text immediately.
-                    try:
-                        asr_audio = audio_f32_24k
-                        if len(asr_audio) > ASR_MAX_AUDIO_SAMPLES:
-                            asr_audio = asr_audio[-ASR_MAX_AUDIO_SAMPLES:]
-                        assert _asr_lock is not None
-                        async with _serialize(_asr_lock, _asr_stats):
-                            loop = asyncio.get_event_loop()
-                            stt = await loop.run_in_executor(
-                                None, _asr_transcribe_sync, asr_audio
-                            )
-                        user_text = _clean_asr_text_for_display(
-                            (stt.get("text") or "").strip()
+                    # Fallback / long-audio path. Two cases land here:
+                    #   (a) Gemma failed for a short clip — bg ASR is still
+                    #       running, will post a `late` transcript that
+                    #       updates the bubble created here in-place.
+                    #   (b) Audio > 30 s — no bg task was spawned, so the
+                    #       transcript event below is the only one.
+                    if audio_dur_s > 30.0:
+                        print(
+                            f"[conversation] audio is {audio_dur_s:.1f}s > 30s — "
+                            f"using chunked ASR+Qwen ({int(np.ceil(len(audio_f32_24k) / ASR_WINDOW_SAMPLES))} window(s))"
                         )
+                    else:
+                        print("[conversation] Gemma path failed — falling back to ASR+Qwen")
+                    try:
+                        raw_text = await _asr_long_audio(audio_f32_24k)
+                        user_text = _clean_asr_text_for_display(raw_text)
                         if user_text:
                             audio_url = (
                                 f"/v1/conversation/sessions/{session_id}/turns/{turn_idx}/audio.wav"
@@ -2019,6 +2403,81 @@ async def _gemma4_audio_chat(audio_f32_16k: np.ndarray, history: list[dict]) -> 
     r.raise_for_status()
     j = r.json()
     return (j.get("text") or "").strip()
+
+
+async def _openvoice_enhance_reference(
+    audio_np: np.ndarray,
+    sr: int,
+    donor: Optional[str] = None,
+) -> Optional[dict]:
+    """Send a raw clone reference to the OpenVoice sidecar; receive an
+    articulation-enhanced reference back.
+
+    Returns ``{"audio_np": np.ndarray (24 kHz mono), "metrics": {...},
+    "gen_ms": int, "donor_id": str}`` on success, or ``None`` if the
+    sidecar is unreachable / disabled — caller falls back to the raw
+    upload in that case so the clone always succeeds.
+
+    Failure modes that fall back rather than raise:
+      - OPENVOICE_URL is empty (feature flag off)
+      - sidecar returns non-200 (donor missing, model not loaded, …)
+      - sidecar takes longer than OPENVOICE_TIMEOUT_S
+      - network refused (sidecar not started)
+    """
+    if not OPENVOICE_URL:
+        return None
+    import httpx
+    import io as _io
+    buf = _io.BytesIO()
+    sf.write(buf, audio_np, sr, format="WAV", subtype="PCM_16")
+    buf.seek(0)
+    files = {"target": ("target.wav", buf.getvalue(), "audio/wav")}
+    data = {
+        "donor_id": donor or OPENVOICE_DONOR,
+        "return_metrics": "true",
+    }
+    try:
+        async with httpx.AsyncClient(timeout=OPENVOICE_TIMEOUT_S) as client:
+            r = await client.post(
+                f"{OPENVOICE_URL}/v1/enhance-reference",
+                files=files, data=data,
+            )
+        if r.status_code != 200:
+            print(f"[openvoice] sidecar returned {r.status_code}: "
+                  f"{r.text[:200]}")
+            return None
+        j = r.json()
+    except Exception as e:
+        print(f"[openvoice] sidecar unreachable: {e}")
+        return None
+
+    # Sidecar ships the enhanced WAV as base64 alongside the metrics
+    # — single round-trip, ~33% inflation but JSON-safe and 3× cheaper
+    # than a list-of-ints encoding.
+    import base64 as _b64
+    wav_b64 = j.get("wav_b64") or ""
+    try:
+        wav_bytes = _b64.b64decode(wav_b64) if wav_b64 else b""
+    except Exception as e:
+        print(f"[openvoice] failed to b64-decode enhanced wav: {e}")
+        return None
+    if not wav_bytes:
+        print("[openvoice] sidecar returned empty wav")
+        return None
+    out_sr = int(j.get("output_sample_rate", SAMPLE_RATE))
+    try:
+        out_np, _ = librosa.load(_io.BytesIO(wav_bytes), sr=SAMPLE_RATE, mono=True)
+    except Exception as e:
+        print(f"[openvoice] failed to decode enhanced wav: {e}")
+        return None
+    return {
+        "audio_np": out_np,
+        "sr": SAMPLE_RATE,
+        "metrics": j.get("metrics") or {},
+        "gen_ms": int(j.get("gen_ms") or 0),
+        "donor_id": str(j.get("donor_id") or OPENVOICE_DONOR),
+        "out_sr": out_sr,
+    }
 
 
 async def _conversation_turn_with_response(
