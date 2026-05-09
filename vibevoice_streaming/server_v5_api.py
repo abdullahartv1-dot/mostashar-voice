@@ -1410,6 +1410,81 @@ async def clean_all_voices(_=Depends(require_api_key)):
     return {"cleaned": results}
 
 
+@app.get("/v1/voices/{voice_id}/quality-report", tags=["voices"])
+async def voice_quality_report(voice_id: str, _=Depends(require_api_key)):
+    """Spectral diagnostic of a voice's reference audio.
+
+    Returns the same metrics we use to compare against the gold-standard
+    `default` reference. Lets you check whether a freshly-cloned voice
+    will produce clean TTS without having to listen to a sample.
+
+    Thresholds (all should hold for production quality):
+      duration_s ............. 15 ≤ x ≤ 30
+      peak ................... 0.4 ≤ x ≤ 0.95
+      spectral_flatness ...... ≤ 0.05 (clean speech)
+      hf_speech_ratio ........ ≤ 0.05 (no high-band hiss)
+      sibilant_speech_ratio .. ≥ 0.05 (crisp /s/ /sh/ /f/)
+      hum_50_60hz_ratio ...... ≤ 0.01
+    """
+    profile = _get_voice(voice_id)
+    audio = profile["ref_audio_np"]
+    sr = SAMPLE_RATE
+    if audio.ndim > 1:
+        audio = audio.mean(axis=1)
+
+    rms = float(np.sqrt(np.mean(audio.astype(np.float64) ** 2)))
+    peak = float(np.max(np.abs(audio)))
+
+    fft = np.abs(np.fft.rfft(audio))
+    freqs = np.fft.rfftfreq(len(audio), 1 / sr)
+
+    def band_energy(lo: float, hi: float) -> float:
+        m = (freqs >= lo) & (freqs <= hi)
+        return float(np.sum(fft[m] ** 2)) if m.any() else 0.0
+
+    speech = band_energy(80, 4000)
+    sib = band_energy(4000, 8000)
+    hf = band_energy(8000, sr // 2)
+    hum = band_energy(48, 52) + band_energy(58, 62)
+
+    # Spectral flatness via geometric / arithmetic mean per frame
+    try:
+        from scipy import signal as sps
+        _, _, Sxx = sps.spectrogram(audio, sr, nperseg=2048)
+        Sxx_safe = np.maximum(Sxx, 1e-12)
+        geo = np.exp(np.mean(np.log(Sxx_safe), axis=0))
+        arith = np.mean(Sxx_safe, axis=0)
+        flat = float(np.mean(geo / arith))
+    except Exception:
+        flat = -1.0
+
+    # Score each metric against the gold thresholds
+    duration_s = round(len(audio) / sr, 2)
+    checks = {
+        "duration_s": (duration_s, 15.0 <= duration_s <= 30.0),
+        "peak": (round(peak, 3), 0.4 <= peak <= 0.95),
+        "spectral_flatness": (round(flat, 4), 0 <= flat <= 0.05),
+        "hf_speech_ratio": (round(hf / max(speech, 1e-12), 4), hf / max(speech, 1e-12) <= 0.05),
+        "sibilant_speech_ratio": (round(sib / max(speech, 1e-12), 4), sib / max(speech, 1e-12) >= 0.05),
+        "hum_50_60hz_ratio": (round(hum / max(speech, 1e-12), 4), hum / max(speech, 1e-12) <= 0.01),
+    }
+    passed = sum(1 for _, ok in checks.values() if ok)
+    grade = (
+        "gold" if passed == len(checks)
+        else "good" if passed >= len(checks) - 1
+        else "acceptable" if passed >= 3
+        else "poor"
+    )
+    return {
+        "voice_id": voice_id,
+        "name": profile.get("name"),
+        "grade": grade,
+        "passed": f"{passed}/{len(checks)}",
+        "rms": round(rms, 4),
+        "metrics": {k: {"value": v[0], "ok": v[1]} for k, v in checks.items()},
+    }
+
+
 @app.delete("/v1/voices/{voice_id}", tags=["voices"])
 async def delete_voice(voice_id: str, _=Depends(require_api_key)):
     if voice_id == "default":
