@@ -1211,6 +1211,58 @@ async def health():
 async def health_legacy(): return await health()
 
 
+@app.get("/v1/conversation/sessions/{session_id}/turns/{turn_idx}/audio.wav", tags=["conversation"])
+async def conversation_session_audio(
+    session_id: str,
+    turn_idx: int,
+    api_key: Optional[str] = Query(None, description="Auth fallback for <audio> tags that can't set headers"),
+    xi_api_key: Optional[str] = Header(None, alias="xi-api-key"),
+    authorization: Optional[str] = Header(None),
+):
+    """Serve the user's recorded audio for a given conversation turn.
+
+    Lets the chat UI render an <audio controls> below the transcript so
+    the user can play back exactly what was sent. Accepts the api key
+    via either header (preferred) or `?api_key=` query param (the
+    `<audio>` element can't set custom headers, so we fall through to
+    the query string).
+    """
+    if API_KEY:
+        candidate = xi_api_key or api_key
+        if not candidate and authorization and authorization.lower().startswith("bearer "):
+            candidate = authorization[7:]
+        if candidate != API_KEY:
+            raise HTTPException(401, "invalid_api_key")
+    # Path-traversal guard
+    if not re.fullmatch(r"sess-\d+-[A-Za-z0-9]+", session_id):
+        raise HTTPException(404, "session not found")
+    audio_path = os.path.join(SESSION_LOG_DIR, session_id, f"turn_{turn_idx:03d}.wav")
+    if not os.path.exists(audio_path):
+        raise HTTPException(404, "turn audio not found")
+    return FileResponse(audio_path, media_type="audio/wav")
+
+
+@app.get("/v1/conversation/sessions/{session_id}/log", tags=["conversation"])
+async def conversation_session_log(
+    session_id: str,
+    _=Depends(require_api_key),
+):
+    """Return the full transcript log of a session (one row per turn)."""
+    if not re.fullmatch(r"sess-\d+-[A-Za-z0-9]+", session_id):
+        raise HTTPException(404, "session not found")
+    log_path = os.path.join(SESSION_LOG_DIR, session_id, "transcript.jsonl")
+    if not os.path.exists(log_path):
+        raise HTTPException(404, "session not found")
+    rows = []
+    with open(log_path, "r", encoding="utf-8") as f:
+        for line in f:
+            try:
+                rows.append(json.loads(line))
+            except Exception:
+                pass
+    return {"session_id": session_id, "turns": rows}
+
+
 @app.get("/v1/queue-status", tags=["misc"])
 async def queue_status(_=Depends(require_api_key)):
     """Live concurrency snapshot per model. Useful for monitoring + debugging.
@@ -1741,8 +1793,11 @@ async def conversation_ws(ws: WebSocket):
     ]
     interrupt_flag = {"value": False}
     # Allow client to resume by passing ?session_id= — otherwise mint a new one.
+    # 12-hex-char tail is hard to guess (~2^48); combined with api_key auth
+    # this is sufficient secrecy for replay-only access.
     requested_sid = ws.query_params.get("session_id", "")
-    session_id = requested_sid or f"sess-{int(time.time())}-{uuid.uuid4().hex[:6]}"
+    session_id = requested_sid if re.fullmatch(r"sess-\d+-[A-Za-z0-9]+", requested_sid) else \
+        f"sess-{int(time.time())}-{uuid.uuid4().hex[:12]}"
     session_log = SessionLog(session_id)
     await ws.send_json({"type": "session", "session_id": session_id})
 
@@ -1837,11 +1892,16 @@ async def conversation_ws(ws: WebSocket):
                     # Surface to the UI (chat bubble) — the `late` flag
                     # tells the client this transcript landed AFTER the
                     # response, so it can insert/update accordingly.
+                    # `audio_url` lets the chat render an inline player.
+                    audio_url = (
+                        f"/v1/conversation/sessions/{session_id}/turns/{turn_idx}/audio.wav"
+                    )
                     try:
                         await ws.send_json({
                             "type": "transcript",
                             "text": clean_text,
                             "turn": turn_idx,
+                            "audio_url": audio_url,
                             "late": True,
                         })
                     except Exception:
@@ -1858,12 +1918,23 @@ async def conversation_ws(ws: WebSocket):
                 asyncio.create_task(_bg_asr_and_emit())
 
                 # Critical path: Gemma 4 audio → response → TTS.
+                # IMPORTANT: Gemma 4's audio encoder caps at 30 s. If the
+                # user spoke longer than that, sending the full clip would
+                # silently truncate and we'd lose the LATTER part of their
+                # turn (the most recent context). For long utterances we
+                # fall back to ASR + Qwen which has no per-turn audio cap.
+                audio_dur_s = len(audio_f32_16k) / INPUT_SAMPLE_RATE
                 gemma_response = None
-                if GEMMA4_URL:
+                if GEMMA4_URL and audio_dur_s <= 30.0:
                     try:
                         gemma_response = await _gemma4_audio_chat(audio_f32_16k, history)
                     except Exception as e:
                         print(f"[conversation] Gemma 4 failed: {e}")
+                elif audio_dur_s > 30.0:
+                    print(
+                        f"[conversation] audio is {audio_dur_s:.1f}s > 30s — "
+                        f"skipping Gemma 4 audio path, will use ASR+Qwen"
+                    )
 
                 if gemma_response and _looks_arabic(gemma_response):
                     # Push placeholder user turn into history so the next
@@ -1896,7 +1967,15 @@ async def conversation_ws(ws: WebSocket):
                             (stt.get("text") or "").strip()
                         )
                         if user_text:
-                            await ws.send_json({"type": "transcript", "text": user_text})
+                            audio_url = (
+                                f"/v1/conversation/sessions/{session_id}/turns/{turn_idx}/audio.wav"
+                            )
+                            await ws.send_json({
+                                "type": "transcript",
+                                "text": user_text,
+                                "turn": turn_idx,
+                                "audio_url": audio_url,
+                            })
                             response_text = await _conversation_turn(
                                 ws, voice_id, language, user_text,
                                 history, interrupt_flag,
