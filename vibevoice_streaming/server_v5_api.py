@@ -100,11 +100,57 @@ API_KEY = os.environ.get("MV_API_KEY", "")  # if empty, auth is disabled
 os.makedirs(VOICES_DIR, exist_ok=True)
 
 DEFAULT_SYSTEM_PROMPT = (
-    "أنت مساعد صوتي ذكي لمنصة مستشار. تجيب باختصار ووضوح بالعربية الفصحى "
-    "بنبرة ودودة ومحترفة. اجعل ردودك قصيرة (جملتان أو ثلاث) لأنها ستُحوَّل "
-    "إلى صوت ويسمعها المستخدم مباشرة. لا تستخدم رموز Markdown أو قوائم — "
-    "اكتب نصاً طبيعياً فقط."
+    "أنت مساعد صوتي ذكي لمنصة مستشار. مهمتك أن تجيب على المستخدم بنبرة "
+    "ودودة ومحترفة.\n\n"
+    "قواعد صارمة يجب الالتزام بها دائماً:\n"
+    "1. ردّ دائماً بالعربية الفصحى الواضحة. ممنوع منعاً تاماً استخدام الصينية "
+    "أو الإنجليزية أو أي لغة غير العربية، حتى لو كان كلام المستخدم غامضاً "
+    "أو مقطوعاً أو فيه أخطاء.\n"
+    "2. اجعل ردك قصيراً جداً: جملة واحدة أو جملتان فقط. الردّ سيُحوَّل إلى "
+    "صوت ويسمعه المستخدم مباشرة، فالطول يُتعب الأذن.\n"
+    "3. اكتب نصاً طبيعياً منطوقاً — لا قوائم، لا Markdown، لا أرقام بنود، "
+    "لا رموز خاصة، لا روابط.\n"
+    "4. أضف التشكيل الكامل (الفتحة، الضمة، الكسرة، السكون، الشدّة، التنوين) "
+    "على الكلمات المهمة لتحسين النطق.\n"
+    "5. إذا كلام المستخدم غير واضح أو مقطوع، اطلب منه أن يعيد بإيجاز "
+    "بدلاً من التخمين."
 )
+
+
+# Words we strip from ASR output before passing to the LLM. VibeVoice-ASR
+# emits these structural markers in transcribed segments and they confuse
+# the LM (it sees them as part of the user's intent).
+_ASR_NOISE_TOKENS_RE = re.compile(
+    r"\[(?:silence|Silence|SILENCE|noise|Noise|music|Music)\]", re.IGNORECASE
+)
+
+
+def _clean_asr_text_for_llm(text: str) -> str:
+    """Strip ASR structural markers + collapse whitespace before LLM call."""
+    cleaned = _ASR_NOISE_TOKENS_RE.sub(" ", text)
+    cleaned = re.sub(r"\s+", " ", cleaned).strip()
+    return cleaned
+
+
+# Detect script of LLM output. If the response is dominated by non-Arabic
+# scripts, we know the LM hallucinated and we retry with a stricter prompt.
+_ARABIC_RE = re.compile(r"[؀-ۿݐ-ݿࢠ-ࣿﭐ-﷿ﹰ-﻿]")
+_CJK_RE = re.compile(r"[぀-ヿ一-鿿가-힯]")
+
+
+def _looks_arabic(text: str, min_ratio: float = 0.4) -> bool:
+    """Returns False if the response is dominated by CJK (Chinese hallucination)
+    or has almost no Arabic characters."""
+    if not text or not text.strip():
+        return True  # empty — let it through, caller will handle
+    letters = [c for c in text if c.isalpha()]
+    if not letters:
+        return True
+    arabic = sum(1 for c in letters if _ARABIC_RE.match(c))
+    cjk = sum(1 for c in letters if _CJK_RE.match(c))
+    if cjk > arabic:
+        return False
+    return (arabic / len(letters)) >= min_ratio
 
 # --- shared state ---
 processor = None
@@ -1577,8 +1623,13 @@ async def conversation_ws(ws: WebSocket):
                 assert _asr_lock is not None
                 async with _serialize(_asr_lock, _asr_stats):
                     stt_result = await loop.run_in_executor(None, _asr_transcribe_sync, audio_f32)
-                user_text = stt_result["text"].strip()
-                await ws.send_json({"type": "transcript", "text": user_text})
+                # Surface the raw transcript to the user (so they see what
+                # the model actually heard), then strip ASR-only structural
+                # tokens like [Silence] before feeding it to the LLM —
+                # otherwise the LM treats them as part of the user's intent.
+                user_text_raw = stt_result["text"].strip()
+                user_text = _clean_asr_text_for_llm(user_text_raw)
+                await ws.send_json({"type": "transcript", "text": user_text_raw})
                 if not user_text:
                     continue
                 await _conversation_turn(ws, voice_id, language, user_text, history, interrupt_flag)
@@ -1612,6 +1663,36 @@ async def _conversation_turn(
             None, lambda: _llm_generate_sync(history, max_new_tokens=256)
         )
     response_text = response_text.strip()
+
+    # Language guard: if Qwen drifted into Chinese/English (it sometimes
+    # does on ambiguous Arabic input), retry once with an even more
+    # explicit "Arabic only, even if input is unclear" instruction.
+    if not _looks_arabic(response_text):
+        retry_msgs = list(history) + [
+            {
+                "role": "assistant",
+                "content": response_text,
+            },
+            {
+                "role": "user",
+                "content": (
+                    "أعد ردّك السابق بالعربية الفصحى فقط. ممنوع استخدام أي "
+                    "لغة غير العربية مهما كانت الظروف. اجعل الرد جملة "
+                    "واحدة قصيرة."
+                ),
+            },
+        ]
+        async with _serialize(_llm_lock, _llm_stats):
+            retry = await loop.run_in_executor(
+                None, lambda: _llm_generate_sync(retry_msgs, max_new_tokens=200)
+            )
+        retry = retry.strip()
+        if _looks_arabic(retry):
+            response_text = retry
+        else:
+            # Hard fallback — better to apologize than to ship Chinese audio.
+            response_text = "عذراً، لم أفهم ما طلبته بشكل واضح. هل يمكنك إعادة سؤالك من فضلك؟"
+
     history.append({"role": "assistant", "content": response_text})
     await ws.send_json({"type": "response_text", "text": response_text, "language": language})
 
