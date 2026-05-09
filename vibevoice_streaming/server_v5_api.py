@@ -1121,11 +1121,33 @@ def _whisper_transcribe_sync(audio_f32_16k: np.ndarray) -> str:
 
     Returns the cleaned text. Empty string on any failure (caller falls
     back to VibeVoice-ASR if it gets nothing).
+
+    Hallucination guard: Whisper is famous for confidently inventing
+    plausible Arabic phrases when fed near-silent or noise-only audio
+    (e.g. "في هذا الحال" from a mic burst). We pre-check for voice
+    activity using a simple energy-based VAD and bail out early if
+    < 5 % of the clip has speech-like energy. Cheap (~1 ms) and
+    eliminates the most common hallucination case in practice.
     """
     if whisper_processor is None or whisper_model is None:
         return ""
     if len(audio_f32_16k) < int(0.2 * INPUT_SAMPLE_RATE):
         return ""
+
+    # Energy-based VAD pre-check.
+    hop = INPUT_SAMPLE_RATE // 10  # 100 ms windows
+    n_windows = max(1, len(audio_f32_16k) // hop)
+    energies = np.array([
+        float(np.sqrt((audio_f32_16k[i*hop : (i+1)*hop] ** 2).mean() + 1e-12))
+        for i in range(n_windows)
+    ])
+    threshold = max(0.005, float(energies.max()) * 0.1)
+    voiced_ratio = float((energies > threshold).sum()) / n_windows
+    if voiced_ratio < 0.05:
+        # < 5 % voice activity = essentially silent. Don't waste a
+        # forward pass + don't risk Whisper hallucinating.
+        return ""
+
     # Whisper's native input is 30 s — clamp defensively. The caller's
     # windowing should have guaranteed this, but better safe.
     audio = audio_f32_16k[: 30 * INPUT_SAMPLE_RATE]
@@ -1630,12 +1652,27 @@ async def conversation_session_audio(
 @app.get("/v1/conversation/sessions/{session_id}/log", tags=["conversation"])
 async def conversation_session_log(
     session_id: str,
+    include_audio_metrics: bool = Query(
+        False,
+        description="If true, attach peak/RMS/voiced-ratio per turn so "
+                    "you can see at a glance which turns had clipped or "
+                    "near-silent audio (= why ASR may have failed).",
+    ),
     _=Depends(require_api_key),
 ):
-    """Return the full transcript log of a session (one row per turn)."""
+    """Return the full transcript log of a session (one row per turn).
+
+    Optional `include_audio_metrics=true` adds:
+      - peak: max abs sample, ≥ 0.99 = audio is clipped (frontend mic
+        gain too high — both Whisper and Gemma 4 struggle with it)
+      - rms: root-mean-square energy, low values mean silent/quiet
+      - voiced_ratio: percentage of 100 ms windows above the energy
+        floor — < 30 % suggests the user barely said anything
+    """
     if not re.fullmatch(r"sess-\d+-[A-Za-z0-9]+", session_id):
         raise HTTPException(404, "session not found")
-    log_path = os.path.join(SESSION_LOG_DIR, session_id, "transcript.jsonl")
+    sess_dir = os.path.join(SESSION_LOG_DIR, session_id)
+    log_path = os.path.join(sess_dir, "transcript.jsonl")
     if not os.path.exists(log_path):
         raise HTTPException(404, "session not found")
     rows = []
@@ -1645,7 +1682,106 @@ async def conversation_session_log(
                 rows.append(json.loads(line))
             except Exception:
                 pass
+    if include_audio_metrics:
+        for r in rows:
+            wav = r.get("audio") or f"turn_{r.get('turn', 0):03d}.wav"
+            wav_path = os.path.join(sess_dir, wav)
+            if os.path.exists(wav_path):
+                r["audio_metrics"] = _audio_diag(wav_path)
+            else:
+                r["audio_metrics"] = None
+            r["audio_url"] = (
+                f"/v1/conversation/sessions/{session_id}/turns/{r.get('turn', 0)}/audio.wav"
+            )
     return {"session_id": session_id, "turns": rows}
+
+
+@app.get("/v1/conversation/sessions", tags=["conversation"])
+async def list_conversation_sessions(
+    limit: int = Query(50, ge=1, le=500, description="Max rows to return"),
+    _=Depends(require_api_key),
+):
+    """List recent conversation sessions, newest first.
+
+    For each session returns a quick summary: turn count, first/last
+    timestamps, total recorded audio duration, and how many turns had
+    an empty transcript (= ASR failed for that turn — usually because
+    the audio was clipped or near-silent).
+
+    Use `/v1/conversation/sessions/{id}/log?include_audio_metrics=true`
+    to dig into a specific session.
+    """
+    if not os.path.isdir(SESSION_LOG_DIR):
+        return {"sessions": []}
+    sessions: list[dict] = []
+    for d in sorted(os.listdir(SESSION_LOG_DIR), reverse=True):
+        if not re.fullmatch(r"sess-\d+-[A-Za-z0-9]+", d):
+            continue
+        sess_dir = os.path.join(SESSION_LOG_DIR, d)
+        log_path = os.path.join(sess_dir, "transcript.jsonl")
+        if not os.path.exists(log_path):
+            continue
+        try:
+            lines = open(log_path, "r", encoding="utf-8").read().splitlines()
+        except Exception:
+            continue
+        rows: list[dict] = []
+        for ln in lines:
+            try:
+                rows.append(json.loads(ln))
+            except Exception:
+                pass
+        if not rows:
+            continue
+        # Sum recorded audio duration from on-disk WAV sizes (cheap —
+        # 16 kHz mono PCM16 is exactly 32 000 bytes/sec).
+        total_audio_s = 0.0
+        for w in os.listdir(sess_dir):
+            if w.startswith("turn_") and w.endswith(".wav"):
+                total_audio_s += os.path.getsize(os.path.join(sess_dir, w)) / 32_000
+        empty_transcripts = sum(1 for r in rows if not (r.get("transcript") or "").strip())
+        sessions.append({
+            "session_id": d,
+            "turns": len(rows),
+            "first_ts": rows[0].get("ts"),
+            "last_ts": rows[-1].get("ts"),
+            "total_audio_s": round(total_audio_s, 1),
+            "empty_transcripts": empty_transcripts,
+        })
+        if len(sessions) >= limit:
+            break
+    return {"sessions": sessions}
+
+
+def _audio_diag(wav_path: str) -> dict:
+    """Cheap WAV diagnostics — peak / RMS / voiced-ratio. Used by the
+    session log endpoint to surface "why did this turn fail" data.
+    Same heuristic as the energy-based VAD we'd run for hallucination
+    suppression in the Whisper helper.
+    """
+    try:
+        audio, _sr = librosa.load(wav_path, sr=INPUT_SAMPLE_RATE, mono=True)
+    except Exception as e:
+        return {"error": str(e)}
+    if len(audio) == 0:
+        return {"duration_s": 0, "peak": 0, "rms": 0, "voiced_ratio": 0}
+    peak = float(np.abs(audio).max())
+    rms = float(np.sqrt((audio ** 2).mean()))
+    hop = INPUT_SAMPLE_RATE // 10  # 100 ms windows
+    n_windows = max(1, len(audio) // hop)
+    energies = [
+        float(np.sqrt((audio[i*hop : (i+1)*hop] ** 2).mean() + 1e-12))
+        for i in range(n_windows)
+    ]
+    threshold = max(0.005, max(energies) * 0.1)
+    voiced = sum(1 for e in energies if e > threshold)
+    return {
+        "duration_s": round(len(audio) / INPUT_SAMPLE_RATE, 2),
+        "peak": round(peak, 3),
+        "rms": round(rms, 4),
+        "voiced_ratio": round(voiced / n_windows, 2),
+        "clipped": peak >= 0.99,  # peak at full scale = clipping
+    }
 
 
 @app.get("/v1/queue-status", tags=["misc"])
