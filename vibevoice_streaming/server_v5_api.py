@@ -115,6 +115,68 @@ llm_model = None
 llm_tokenizer = None
 voice_profiles: dict[str, dict] = {}
 
+# --- concurrency: serialize within each model (different models can run in parallel) ---
+# Single GPU can only run one diffusion/LM forward pass per model at a time
+# without contention. Locks here turn arrival of N concurrent requests into a
+# clean FIFO queue rather than crashing the GPU. Different models still run
+# in parallel: User A's TTS can stream while User B's ASR transcribes.
+_tts_lock: Optional["asyncio.Lock"] = None
+_asr_lock: Optional["asyncio.Lock"] = None
+_llm_lock: Optional["asyncio.Lock"] = None
+
+
+class _ModelStats:
+    """Per-model FIFO queue depth + cumulative wait/run timing."""
+    __slots__ = ("queued", "running", "served", "total_wait_ms", "total_run_ms")
+
+    def __init__(self) -> None:
+        self.queued = 0
+        self.running = 0
+        self.served = 0
+        self.total_wait_ms = 0.0
+        self.total_run_ms = 0.0
+
+    def snapshot(self) -> dict:
+        avg_wait = self.total_wait_ms / self.served if self.served else 0.0
+        avg_run = self.total_run_ms / self.served if self.served else 0.0
+        return {
+            "queued": self.queued,
+            "running": self.running,
+            "served": self.served,
+            "avg_wait_ms": round(avg_wait, 1),
+            "avg_run_ms": round(avg_run, 1),
+        }
+
+
+_tts_stats = _ModelStats()
+_asr_stats = _ModelStats()
+_llm_stats = _ModelStats()
+
+
+@asynccontextmanager
+async def _serialize(lock: "asyncio.Lock", stats: _ModelStats):
+    """Wait our turn on a model, then run. Tracks queue depth + wait timing."""
+    stats.queued += 1
+    t_enq = time.time()
+    try:
+        async with lock:
+            wait_ms = (time.time() - t_enq) * 1000
+            stats.queued -= 1
+            stats.running += 1
+            t_run = time.time()
+            try:
+                yield
+            finally:
+                stats.running -= 1
+                stats.served += 1
+                stats.total_wait_ms += wait_ms
+                stats.total_run_ms += (time.time() - t_run) * 1000
+    except BaseException:
+        # If the caller was cancelled while waiting, still release the queue slot.
+        if stats.queued > 0:
+            stats.queued -= 1
+        raise
+
 
 # ============================================================
 # Models (Pydantic)
@@ -126,7 +188,9 @@ class VoiceSettings(BaseModel):
 
 
 class TTSRequest(BaseModel):
-    text: str = Field(..., min_length=1, max_length=5000)
+    # Up to 200,000 chars ≈ 90 min of speech — VibeVoice-Large handles
+    # long-form single-pass without "stitching" between paragraphs.
+    text: str = Field(..., min_length=1, max_length=200_000)
     model_id: str = Field(default="vibevoice-large")
     output_format: str = Field(default="pcm_24000", pattern="^(pcm_24000|wav)$")
     voice_settings: Optional[VoiceSettings] = None
@@ -193,6 +257,21 @@ class TranscribeResponse(BaseModel):
     speakers_count: int
     segments: list[TranscriptSegment]
     generation_ms: float
+
+
+class DialogueLine(BaseModel):
+    speaker: int = Field(..., ge=1, le=4, description="1-indexed speaker number")
+    text: str = Field(..., min_length=1, max_length=5000)
+
+
+class DialogueRequest(BaseModel):
+    speakers: list[str] = Field(
+        ..., min_length=1, max_length=4,
+        description="Voice IDs in speaker order. Speaker 1 = speakers[0], etc.",
+    )
+    lines: list[DialogueLine] = Field(..., min_length=1, max_length=200)
+    voice_settings: Optional[VoiceSettings] = None
+    output_format: str = Field(default="wav", pattern="^(pcm_24000|wav)$")
 
 
 # ============================================================
@@ -335,6 +414,54 @@ def _generate_full(text: str, voice_id: str, settings: Optional[VoiceSettings] =
     return out.speech_outputs[0].cpu().float().numpy().flatten()
 
 
+def _generate_dialogue(
+    lines: list[DialogueLine],
+    speaker_voice_ids: list[str],
+    settings: Optional[VoiceSettings] = None,
+) -> np.ndarray:
+    """Generate a multi-speaker dialogue in a single VibeVoice forward pass.
+
+    Each speaker has its own reference audio; VibeVoice automatically
+    switches voices on `Speaker N:` line breaks. We build the full script
+    once and let the model handle prosody continuity across turns.
+    """
+    profiles = [_get_voice(vid) for vid in speaker_voice_ids]
+    speaker_refs = [p["ref_audio_np"] for p in profiles]
+
+    if settings:
+        model.set_ddpm_inference_steps(num_steps=settings.diffusion_steps)
+
+    # Validate every line refers to a defined speaker.
+    for line in lines:
+        if line.speaker < 1 or line.speaker > len(speaker_voice_ids):
+            raise HTTPException(
+                400,
+                f"line refers to speaker {line.speaker} but only "
+                f"{len(speaker_voice_ids)} voices were provided",
+            )
+
+    script = "\n".join(f"Speaker {line.speaker}: {line.text.strip()}" for line in lines)
+    inputs = processor(
+        text=[script],
+        voice_samples=[speaker_refs],
+        return_tensors="pt",
+        padding=True,
+    )
+    inputs = {k: (v.to("cuda") if hasattr(v, "to") else v) for k, v in inputs.items()}
+    torch.manual_seed(settings.seed if settings else 42)
+    with torch.no_grad():
+        out = model.generate(
+            **inputs,
+            max_new_tokens=None,
+            cfg_scale=settings.cfg_scale if settings else CFG_SCALE,
+            tokenizer=processor.tokenizer,
+            generation_config={"do_sample": False, "num_beams": 1},
+            verbose=False,
+            show_progress_bar=False,
+        )
+    return out.speech_outputs[0].cpu().float().numpy().flatten()
+
+
 async def _generate_stream(text: str, voice_id: str, settings: Optional[VoiceSettings] = None) -> AsyncGenerator[bytes, None]:
     """Async generator yielding PCM16LE chunks as the model produces them."""
     from vibevoice.modular.streamer import AudioStreamer
@@ -394,8 +521,14 @@ def _decode_audio_bytes(audio_bytes: bytes, sr: int = ASR_SAMPLE_RATE) -> np.nda
     return audio_np
 
 
-def _asr_transcribe_sync(audio_np: np.ndarray) -> dict:
+def _asr_transcribe_sync(audio_np: np.ndarray, hotwords: Optional[str] = None) -> dict:
     """Run VibeVoice-ASR on a single audio array (float32, 24kHz, mono).
+
+    Args:
+        audio_np: float32 mono audio at 24kHz
+        hotwords: optional comma-separated domain terms (names, technical jargon)
+                  to bias recognition. The processor embeds them in the prompt
+                  as "with extra info: {hotwords}".
 
     Returns dict with keys: text, segments (list of dicts), generation_s.
     """
@@ -408,6 +541,7 @@ def _asr_transcribe_sync(audio_np: np.ndarray) -> dict:
         return_tensors="pt",
         padding=True,
         add_generation_prompt=True,
+        context_info=hotwords if hotwords and hotwords.strip() else None,
     )
 
     def _to_dev(v):
@@ -452,11 +586,90 @@ def _asr_transcribe_sync(audio_np: np.ndarray) -> dict:
 # ============================================================
 # LLM (Qwen2.5-Instruct) — used by the conversation endpoint
 # ============================================================
+# Cached prefill of the system prompt. Built once at startup and reused
+# across every conversation turn that begins with the same system prompt.
+# Skips ~150-300 tokens of prefill per turn → measurable TTFA reduction.
+_llm_system_cache: Optional[dict] = None
+
+
+def _build_system_prefill_cache(system_prompt: str) -> Optional[dict]:
+    """Pre-compute KV cache for the system prompt so we never re-prefill it."""
+    if llm_model is None or llm_tokenizer is None:
+        return None
+    try:
+        sys_text = llm_tokenizer.apply_chat_template(
+            [{"role": "system", "content": system_prompt}],
+            tokenize=False,
+            add_generation_prompt=False,
+        )
+        sys_ids = llm_tokenizer(sys_text, return_tensors="pt").to("cuda")
+        with torch.no_grad():
+            out = llm_model(**sys_ids, use_cache=True)
+        return {
+            "system_prompt": system_prompt,
+            "input_ids": sys_ids["input_ids"],
+            "past_key_values": out.past_key_values,
+            "tokens": sys_ids["input_ids"].shape[1],
+        }
+    except Exception as e:
+        print(f"[llm-prefill] cache build failed: {e}")
+        return None
+
+
 def _llm_generate_sync(messages: list[dict], max_new_tokens: int = 256) -> str:
-    """Run Qwen on a chat-formatted message list and return assistant text."""
+    """Run Qwen on a chat-formatted message list and return assistant text.
+
+    If `messages[0]` is a system message that matches the cached prefill,
+    we reuse the precomputed KV cache and only feed the (much shorter)
+    user/assistant turns through the prefill — saves ~50-150 ms per turn.
+    """
     if llm_model is None or llm_tokenizer is None:
         raise HTTPException(503, "LLM not loaded")
 
+    cache = _llm_system_cache
+    can_reuse = (
+        cache is not None
+        and len(messages) >= 1
+        and messages[0].get("role") == "system"
+        and messages[0].get("content") == cache.get("system_prompt")
+    )
+
+    if can_reuse:
+        # Build only the dialog after the system message, then concat ids.
+        dialog_text = llm_tokenizer.apply_chat_template(
+            messages[1:], tokenize=False, add_generation_prompt=True
+        )
+        dialog_ids = llm_tokenizer(
+            dialog_text, return_tensors="pt", add_special_tokens=False
+        ).to("cuda")
+        # We pass full input_ids so HuggingFace .generate() can correctly
+        # build the position ids etc., plus the cached KV via past_key_values.
+        full_ids = torch.cat([cache["input_ids"], dialog_ids["input_ids"]], dim=1)
+        # IMPORTANT: clone the KV cache — .generate() appends turn KVs to
+        # `past_key_values` in place, which would pollute the shared cache
+        # for the next turn. Cloning is fast (just GPU memcpy of small tensors).
+        try:
+            import copy as _copy
+            pkv_clone = _copy.deepcopy(cache["past_key_values"])
+            with torch.no_grad():
+                out = llm_model.generate(
+                    input_ids=full_ids,
+                    past_key_values=pkv_clone,
+                    max_new_tokens=max_new_tokens,
+                    do_sample=True,
+                    temperature=0.7,
+                    top_p=0.9,
+                    repetition_penalty=1.05,
+                    pad_token_id=llm_tokenizer.eos_token_id,
+                )
+            new_ids = out[0, full_ids.shape[1]:]
+            return llm_tokenizer.decode(new_ids, skip_special_tokens=True).strip()
+        except Exception as e:
+            # If anything goes wrong with the cached path, fall back to cold.
+            print(f"[llm-prefill] reuse failed, falling back: {e}")
+            # fall through to cold path
+
+    # Cold path: full prefill of the whole chat.
     chat = llm_tokenizer.apply_chat_template(
         messages, tokenize=False, add_generation_prompt=True
     )
@@ -480,7 +693,11 @@ def _llm_generate_sync(messages: list[dict], max_new_tokens: int = 256) -> str:
 # ============================================================
 @asynccontextmanager
 async def lifespan(app: FastAPI):
-    global processor, model
+    global processor, model, _tts_lock, _asr_lock, _llm_lock
+    # Locks must be created on the running event loop, not at import time.
+    _tts_lock = asyncio.Lock()
+    _asr_lock = asyncio.Lock()
+    _llm_lock = asyncio.Lock()
     print(f"[startup] loading {MODEL_NAME} with flash_attention_2...")
     t0 = time.time()
     from vibevoice.modular.modeling_vibevoice_inference import VibeVoiceForConditionalGenerationInference
@@ -575,6 +792,13 @@ async def lifespan(app: FastAPI):
                 print("[startup] LLM warmup done")
             except Exception as e:
                 print(f"[startup] LLM warmup error: {e}")
+            # Pre-cache the system prompt KV so every conversation turn
+            # skips re-prefilling the same ~150 system-prompt tokens.
+            global _llm_system_cache
+            _llm_system_cache = _build_system_prefill_cache(DEFAULT_SYSTEM_PROMPT)
+            if _llm_system_cache is not None:
+                print(f"[startup] LLM system-prompt KV cache ready "
+                      f"({_llm_system_cache['tokens']} tokens)")
         except Exception as e:
             print(f"[startup] LLM DISABLED — load failed: {e}")
             llm_model = None
@@ -623,6 +847,23 @@ async def health():
 
 @app.get("/health", include_in_schema=False)
 async def health_legacy(): return await health()
+
+
+@app.get("/v1/queue-status", tags=["misc"])
+async def queue_status(_=Depends(require_api_key)):
+    """Live concurrency snapshot per model. Useful for monitoring + debugging.
+
+    `queued`: requests waiting for the model.
+    `running`: 1 if a request is using the model right now, else 0.
+    `served`: cumulative requests completed since startup.
+    `avg_wait_ms`: mean queue wait time across served requests.
+    `avg_run_ms`: mean GPU time across served requests.
+    """
+    return {
+        "tts": _tts_stats.snapshot(),
+        "asr": _asr_stats.snapshot(),
+        "llm": _llm_stats.snapshot(),
+    }
 
 
 # ============================================================
@@ -758,7 +999,12 @@ async def tts_full(
     _=Depends(require_api_key),
 ):
     """Generate the full audio (non-streaming). Returns WAV file."""
-    audio = _generate_full(req.text, voice_id, req.voice_settings)
+    loop = asyncio.get_event_loop()
+    assert _tts_lock is not None
+    async with _serialize(_tts_lock, _tts_stats):
+        audio = await loop.run_in_executor(
+            None, _generate_full, req.text, voice_id, req.voice_settings
+        )
     a16 = (np.clip(audio, -1.0, 1.0) * 32767).astype(np.int16)
     body = _wav_header(len(a16)) + a16.tobytes()
     return Response(content=body, media_type="audio/wav")
@@ -783,12 +1029,14 @@ async def tts_stream(
         if is_wav:
             yield _wav_streaming_header(SAMPLE_RATE)
         first_emitted = False
-        async for chunk in _generate_stream(req.text, voice_id, req.voice_settings):
-            if not first_emitted:
-                ttfa_ms = (time.time() - request_start) * 1000
-                print(f"[tts_stream] voice={voice_id} TTFA={ttfa_ms:.0f}ms")
-                first_emitted = True
-            yield chunk
+        assert _tts_lock is not None
+        async with _serialize(_tts_lock, _tts_stats):
+            async for chunk in _generate_stream(req.text, voice_id, req.voice_settings):
+                if not first_emitted:
+                    ttfa_ms = (time.time() - request_start) * 1000
+                    print(f"[tts_stream] voice={voice_id} TTFA={ttfa_ms:.0f}ms")
+                    first_emitted = True
+                yield chunk
 
     headers = {
         "X-Sample-Rate": str(SAMPLE_RATE),
@@ -799,12 +1047,52 @@ async def tts_stream(
 
 
 # ============================================================
+# Multi-Speaker Dialogue
+# ============================================================
+@app.post("/v1/dialogue", tags=["tts"], responses={
+    200: {"content": {"audio/wav": {}}, "description": "Full WAV audio of the dialogue"},
+})
+async def dialogue(req: DialogueRequest, _=Depends(require_api_key)):
+    """Generate a multi-speaker dialogue (e.g. role-play, podcast, training scenario).
+
+    Up to 4 distinct voices in one continuous audio file with natural turn-taking.
+    Specify each line by speaker index (1-based) and text.
+
+    Example body:
+        {
+          "speakers": ["hamed_saudi", "salma_egypt"],
+          "lines": [
+            {"speaker": 1, "text": "السلام عليكم. كيف يمكنني مساعدتك؟"},
+            {"speaker": 2, "text": "أريد فتح حساب جديد من فضلك."},
+            {"speaker": 1, "text": "بكل سرور. دعنا نبدأ."}
+          ]
+        }
+    """
+    loop = asyncio.get_event_loop()
+    assert _tts_lock is not None
+    async with _serialize(_tts_lock, _tts_stats):
+        audio = await loop.run_in_executor(
+            None, lambda: _generate_dialogue(req.lines, req.speakers, req.voice_settings)
+        )
+    a16 = (np.clip(audio, -1.0, 1.0) * 32767).astype(np.int16)
+    if req.output_format == "wav":
+        body = _wav_header(len(a16)) + a16.tobytes()
+        return Response(content=body, media_type="audio/wav")
+    # raw PCM16LE
+    return Response(content=a16.tobytes(), media_type="audio/pcm")
+
+
+# ============================================================
 # Speech-to-Text (VibeVoice-ASR)
 # ============================================================
 @app.post("/v1/speech-to-text", response_model=STTResponse, tags=["stt"])
 async def speech_to_text(
     file: UploadFile = File(..., description="Audio file (mp3/wav/m4a/webm/ogg)"),
     language: str = Form("ar"),
+    hotwords: Optional[str] = Form(
+        None,
+        description='Comma-separated domain terms to bias recognition (e.g. "أرامكو, STC, Kubernetes")',
+    ),
     _=Depends(require_api_key),
 ):
     """Simple STT — returns plain transcribed text. ElevenLabs-compatible shape.
@@ -818,7 +1106,9 @@ async def speech_to_text(
     if len(audio_np) < 0.1 * ASR_SAMPLE_RATE:
         raise HTTPException(400, "audio too short (<100ms)")
     loop = asyncio.get_event_loop()
-    result = await loop.run_in_executor(None, _asr_transcribe_sync, audio_np)
+    assert _asr_lock is not None
+    async with _serialize(_asr_lock, _asr_stats):
+        result = await loop.run_in_executor(None, _asr_transcribe_sync, audio_np, hotwords)
     return STTResponse(
         text=result["text"],
         language=language,
@@ -830,11 +1120,16 @@ async def speech_to_text(
 async def transcribe(
     file: UploadFile = File(..., description="Audio file (mp3/wav/m4a/webm/ogg)"),
     language: str = Form("ar"),
+    hotwords: Optional[str] = Form(
+        None,
+        description='Comma-separated domain terms to bias recognition (e.g. "أرامكو, STC, Kubernetes")',
+    ),
     _=Depends(require_api_key),
 ):
     """Full transcription with diarization (who), timestamps (when), and content (what).
 
     Uses VibeVoice-ASR's structured-JSON output. Up to 60 minutes single-pass.
+    Pass `hotwords` to lift recognition accuracy on domain-specific names/terms.
     """
     if asr_model is None:
         raise HTTPException(503, "ASR not available on this server")
@@ -843,7 +1138,9 @@ async def transcribe(
     if len(audio_np) < 0.1 * ASR_SAMPLE_RATE:
         raise HTTPException(400, "audio too short (<100ms)")
     loop = asyncio.get_event_loop()
-    result = await loop.run_in_executor(None, _asr_transcribe_sync, audio_np)
+    assert _asr_lock is not None
+    async with _serialize(_asr_lock, _asr_stats):
+        result = await loop.run_in_executor(None, _asr_transcribe_sync, audio_np, hotwords)
     segs = [
         TranscriptSegment(
             start_time=float(s.get("start_time", 0.0)),
@@ -971,7 +1268,9 @@ async def conversation_ws(ws: WebSocket):
                     continue
 
                 loop = asyncio.get_event_loop()
-                stt_result = await loop.run_in_executor(None, _asr_transcribe_sync, audio_f32)
+                assert _asr_lock is not None
+                async with _serialize(_asr_lock, _asr_stats):
+                    stt_result = await loop.run_in_executor(None, _asr_transcribe_sync, audio_f32)
                 user_text = stt_result["text"].strip()
                 await ws.send_json({"type": "transcript", "text": user_text})
                 if not user_text:
@@ -1001,9 +1300,11 @@ async def _conversation_turn(
     history.append({"role": "user", "content": user_text})
 
     loop = asyncio.get_event_loop()
-    response_text = await loop.run_in_executor(
-        None, lambda: _llm_generate_sync(history, max_new_tokens=256)
-    )
+    assert _llm_lock is not None
+    async with _serialize(_llm_lock, _llm_stats):
+        response_text = await loop.run_in_executor(
+            None, lambda: _llm_generate_sync(history, max_new_tokens=256)
+        )
     response_text = response_text.strip()
     history.append({"role": "assistant", "content": response_text})
     await ws.send_json({"type": "response_text", "text": response_text, "language": language})
@@ -1017,14 +1318,16 @@ async def _conversation_turn(
     first_emitted = False
     ttfa_ms = 0.0
     chunks = 0
-    async for pcm in _generate_stream(response_text, voice_id, None):
-        if interrupt_flag["value"]:
-            break
-        if not first_emitted:
-            ttfa_ms = (time.time() - turn_start) * 1000
-            first_emitted = True
-        await ws.send_bytes(pcm)
-        chunks += 1
+    assert _tts_lock is not None
+    async with _serialize(_tts_lock, _tts_stats):
+        async for pcm in _generate_stream(response_text, voice_id, None):
+            if interrupt_flag["value"]:
+                break
+            if not first_emitted:
+                ttfa_ms = (time.time() - turn_start) * 1000
+                first_emitted = True
+            await ws.send_bytes(pcm)
+            chunks += 1
 
     total_ms = (time.time() - turn_start) * 1000
     await ws.send_json({
@@ -1060,24 +1363,33 @@ async def tts_ws(ws: WebSocket, voice_id: str):
 
         first_emitted = False
         chunk_idx = 0
-        async for pcm in _generate_stream(text, voice_id, settings):
-            if not first_emitted:
-                ttfa_ms = (time.time() - request_start) * 1000
-                await ws.send_json({"type": "ttfa", "ms": round(ttfa_ms, 0)})
-                first_emitted = True
-            await ws.send_bytes(pcm)
-            chunk_idx += 1
+        assert _tts_lock is not None
+        async with _serialize(_tts_lock, _tts_stats):
+            async for pcm in _generate_stream(text, voice_id, settings):
+                if not first_emitted:
+                    ttfa_ms = (time.time() - request_start) * 1000
+                    await ws.send_json({"type": "ttfa", "ms": round(ttfa_ms, 0)})
+                    first_emitted = True
+                await ws.send_bytes(pcm)
+                chunk_idx += 1
 
         await ws.send_json({
             "type": "done",
             "total_chunks": chunk_idx,
             "total_wall_ms": round((time.time() - request_start) * 1000, 0),
         })
+        # Send a clean close-frame so the client's onclose fires with code 1000.
+        try:
+            await ws.close(code=1000)
+        except Exception:
+            pass
     except WebSocketDisconnect:
         pass
     except Exception as e:
         import traceback; traceback.print_exc()
         try: await ws.send_json({"type": "error", "message": str(e)[:500]})
+        except Exception: pass
+        try: await ws.close(code=1011)
         except Exception: pass
 
 
