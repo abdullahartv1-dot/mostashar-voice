@@ -89,6 +89,12 @@ ASR_MODEL_NAME = os.environ.get("MV_ASR_MODEL", "microsoft/VibeVoice-ASR")
 ASR_ENABLED = os.environ.get("MV_ASR_ENABLED", "1") not in ("0", "false", "False", "")
 LLM_MODEL_NAME = os.environ.get("MV_LLM_MODEL", "Qwen/Qwen2.5-7B-Instruct")
 LLM_ENABLED = os.environ.get("MV_LLM_ENABLED", "1") not in ("0", "false", "False", "")
+# Gemma 4 sidecar — direct audio→text chat, runs in its own venv on the
+# same host. When reachable, /v1/conversation/ws prefers it over the
+# VibeVoice-ASR + Qwen pipeline (faster, ~half the VRAM, native audio
+# understanding so no transcript drift). Set MV_GEMMA4_URL="" to force
+# the fallback path.
+GEMMA4_URL = os.environ.get("MV_GEMMA4_URL", "http://127.0.0.1:8082")
 DIFFUSION_STEPS = int(os.environ.get("MV_DIFF_STEPS", "15"))
 CFG_SCALE = float(os.environ.get("MV_CFG", "1.8"))
 SAMPLE_RATE = 24000
@@ -1607,32 +1613,60 @@ async def conversation_ws(ws: WebSocket):
                 pcm = bytes(audio_buffer)
                 audio_buffer.clear()
 
-                # PCM16LE 16kHz mono → float32 → resample to 24kHz for VibeVoice
+                # PCM16LE 16kHz mono → float32. Gemma 4 wants 16 kHz directly,
+                # so we keep that rate when delegating to the sidecar. Only
+                # resample to 24 kHz when falling back to VibeVoice-ASR.
                 audio_i16 = np.frombuffer(pcm, dtype=np.int16)
-                audio_f32 = audio_i16.astype(np.float32) / 32768.0
-                if INPUT_SAMPLE_RATE != ASR_SAMPLE_RATE:
-                    audio_f32 = librosa.resample(
-                        audio_f32, orig_sr=INPUT_SAMPLE_RATE, target_sr=ASR_SAMPLE_RATE
-                    )
+                audio_f32_16k = audio_i16.astype(np.float32) / 32768.0
 
-                if len(audio_f32) < 0.2 * ASR_SAMPLE_RATE:
+                if len(audio_f32_16k) < 0.2 * INPUT_SAMPLE_RATE:
                     await ws.send_json({"type": "error", "message": "audio too short"})
                     continue
 
-                loop = asyncio.get_event_loop()
-                assert _asr_lock is not None
-                async with _serialize(_asr_lock, _asr_stats):
-                    stt_result = await loop.run_in_executor(None, _asr_transcribe_sync, audio_f32)
-                # Surface the raw transcript to the user (so they see what
-                # the model actually heard), then strip ASR-only structural
-                # tokens like [Silence] before feeding it to the LLM —
-                # otherwise the LM treats them as part of the user's intent.
-                user_text_raw = stt_result["text"].strip()
-                user_text = _clean_asr_text_for_llm(user_text_raw)
-                await ws.send_json({"type": "transcript", "text": user_text_raw})
-                if not user_text:
-                    continue
-                await _conversation_turn(ws, voice_id, language, user_text, history, interrupt_flag)
+                # Preferred path: Gemma 4 sidecar — direct audio → response,
+                # no separate ASR + LLM. Falls back to the VibeVoice-ASR +
+                # Qwen pipeline if the sidecar is unreachable.
+                used_gemma = False
+                if GEMMA4_URL:
+                    try:
+                        gem = await _gemma4_audio_chat(audio_f32_16k, history)
+                        # Surface a placeholder transcript so the UI shows
+                        # "you said …" — Gemma doesn't expose the internal
+                        # transcript, but the response text proves the
+                        # model heard the audio.
+                        await ws.send_json({
+                            "type": "transcript",
+                            "text": "(audio sent directly to Gemma 4)",
+                        })
+                        await _conversation_turn_with_response(
+                            ws, voice_id, language, "[audio]", gem,
+                            history, interrupt_flag,
+                        )
+                        used_gemma = True
+                    except Exception as e:
+                        # Log + fall back. Don't break the conversation.
+                        print(f"[conversation] Gemma 4 failed, falling back: {e}")
+
+                if not used_gemma:
+                    # Fallback: original ASR + LLM pipeline.
+                    audio_f32_24k = librosa.resample(
+                        audio_f32_16k, orig_sr=INPUT_SAMPLE_RATE,
+                        target_sr=ASR_SAMPLE_RATE,
+                    )
+                    loop = asyncio.get_event_loop()
+                    assert _asr_lock is not None
+                    async with _serialize(_asr_lock, _asr_stats):
+                        stt_result = await loop.run_in_executor(
+                            None, _asr_transcribe_sync, audio_f32_24k
+                        )
+                    user_text_raw = stt_result["text"].strip()
+                    user_text = _clean_asr_text_for_llm(user_text_raw)
+                    await ws.send_json({"type": "transcript", "text": user_text_raw})
+                    if not user_text:
+                        continue
+                    await _conversation_turn(
+                        ws, voice_id, language, user_text, history, interrupt_flag,
+                    )
     except WebSocketDisconnect:
         pass
     except Exception as e:
@@ -1642,6 +1676,74 @@ async def conversation_ws(ws: WebSocket):
             await ws.send_json({"type": "error", "message": str(e)[:500]})
         except Exception:
             pass
+
+
+async def _gemma4_audio_chat(audio_f32_16k: np.ndarray, history: list[dict]) -> str:
+    """POST audio to the Gemma 4 sidecar, return the assistant's text reply.
+
+    Raises on any non-200 response so the caller can fall back to ASR+LLM.
+    """
+    import httpx
+    import io as _io
+    buf = _io.BytesIO()
+    sf.write(buf, audio_f32_16k, INPUT_SAMPLE_RATE, format="WAV", subtype="PCM_16")
+    buf.seek(0)
+    # Strip the system message — sidecar adds its own. Keep prior dialog only.
+    dialog = [t for t in history if t.get("role") in ("user", "assistant")]
+    files = {"file": ("audio.wav", buf.getvalue(), "audio/wav")}
+    data = {"history": json.dumps(dialog, ensure_ascii=False), "max_tokens": "160"}
+    async with httpx.AsyncClient(timeout=60.0) as client:
+        r = await client.post(f"{GEMMA4_URL}/v1/audio-chat", files=files, data=data)
+    r.raise_for_status()
+    j = r.json()
+    return (j.get("text") or "").strip()
+
+
+async def _conversation_turn_with_response(
+    ws: WebSocket,
+    voice_id: str,
+    language: str,
+    user_text_for_history: str,
+    response_text: str,
+    history: list[dict],
+    interrupt_flag: dict,
+):
+    """Variant of _conversation_turn used when the response was already
+    produced upstream (e.g. by Gemma 4). Skips the LLM call, just runs TTS."""
+    turn_start = time.time()
+    history.append({"role": "user", "content": user_text_for_history})
+
+    if not _looks_arabic(response_text):
+        # Defensive — Gemma 4 is consistent in Arabic but if a future model
+        # drifts we still ship a polite Arabic line instead of garbage audio.
+        response_text = "عذراً، لم أفهم ما طلبته بشكل واضح. هل يمكنك إعادة سؤالك من فضلك؟"
+
+    history.append({"role": "assistant", "content": response_text})
+    await ws.send_json({"type": "response_text", "text": response_text, "language": language})
+    await ws.send_json({"type": "audio_meta", "sample_rate": SAMPLE_RATE, "format": "pcm_s16le"})
+
+    first_emitted = False
+    ttfa_ms = 0.0
+    chunks = 0
+    assert _tts_lock is not None
+    async with _serialize(_tts_lock, _tts_stats):
+        async for pcm in _generate_stream(response_text, voice_id, None):
+            if interrupt_flag["value"]:
+                break
+            if not first_emitted:
+                ttfa_ms = (time.time() - turn_start) * 1000
+                first_emitted = True
+            await ws.send_bytes(pcm)
+            chunks += 1
+
+    total_ms = (time.time() - turn_start) * 1000
+    await ws.send_json({
+        "type": "turn_done",
+        "ttfa_ms": round(ttfa_ms),
+        "total_ms": round(total_ms),
+        "chunks": chunks,
+        "engine": "gemma4",
+    })
 
 
 async def _conversation_turn(
