@@ -22,6 +22,8 @@ API conventions (mirror ElevenLabs where reasonable):
   - STT / Transcription:
       POST   /v1/speech-to-text         → multipart audio → {"text": "...", "language": "ar"}
       POST   /v1/transcribe             → multipart audio → {segments, diarization, timestamps}
+  - Live Conversation (S2S):
+      WS     /v1/conversation/ws        → bidirectional speech-to-speech voice agent
   - Health:
       GET    /v1/health
   - Docs:
@@ -85,20 +87,32 @@ from pydantic import BaseModel, Field
 MODEL_NAME = os.environ.get("MV_MODEL", "aoi-ot/VibeVoice-Large")
 ASR_MODEL_NAME = os.environ.get("MV_ASR_MODEL", "microsoft/VibeVoice-ASR")
 ASR_ENABLED = os.environ.get("MV_ASR_ENABLED", "1") not in ("0", "false", "False", "")
+LLM_MODEL_NAME = os.environ.get("MV_LLM_MODEL", "Qwen/Qwen2.5-7B-Instruct")
+LLM_ENABLED = os.environ.get("MV_LLM_ENABLED", "1") not in ("0", "false", "False", "")
 DIFFUSION_STEPS = int(os.environ.get("MV_DIFF_STEPS", "15"))
 CFG_SCALE = float(os.environ.get("MV_CFG", "1.8"))
 SAMPLE_RATE = 24000
 ASR_SAMPLE_RATE = 24000  # ASR also expects 24kHz
+INPUT_SAMPLE_RATE = 16000  # mic capture from clients (resampled before ASR)
 DEFAULT_REF = os.environ.get("MV_REF", "/workspace/refs/01.mp3")
 VOICES_DIR = os.environ.get("MV_VOICES_DIR", "/workspace/refs/voices")
 API_KEY = os.environ.get("MV_API_KEY", "")  # if empty, auth is disabled
 os.makedirs(VOICES_DIR, exist_ok=True)
+
+DEFAULT_SYSTEM_PROMPT = (
+    "أنت مساعد صوتي ذكي لمنصة مستشار. تجيب باختصار ووضوح بالعربية الفصحى "
+    "بنبرة ودودة ومحترفة. اجعل ردودك قصيرة (جملتان أو ثلاث) لأنها ستُحوَّل "
+    "إلى صوت ويسمعها المستخدم مباشرة. لا تستخدم رموز Markdown أو قوائم — "
+    "اكتب نصاً طبيعياً فقط."
+)
 
 # --- shared state ---
 processor = None
 model = None
 asr_processor = None
 asr_model = None
+llm_model = None
+llm_tokenizer = None
 voice_profiles: dict[str, dict] = {}
 
 
@@ -155,6 +169,8 @@ class HealthResponse(BaseModel):
     version: str
     asr_loaded: bool = False
     asr_model: Optional[str] = None
+    llm_loaded: bool = False
+    llm_model: Optional[str] = None
 
 
 class TranscriptSegment(BaseModel):
@@ -434,6 +450,32 @@ def _asr_transcribe_sync(audio_np: np.ndarray) -> dict:
 
 
 # ============================================================
+# LLM (Qwen2.5-Instruct) — used by the conversation endpoint
+# ============================================================
+def _llm_generate_sync(messages: list[dict], max_new_tokens: int = 256) -> str:
+    """Run Qwen on a chat-formatted message list and return assistant text."""
+    if llm_model is None or llm_tokenizer is None:
+        raise HTTPException(503, "LLM not loaded")
+
+    chat = llm_tokenizer.apply_chat_template(
+        messages, tokenize=False, add_generation_prompt=True
+    )
+    inputs = llm_tokenizer(chat, return_tensors="pt").to("cuda")
+    with torch.no_grad():
+        out = llm_model.generate(
+            **inputs,
+            max_new_tokens=max_new_tokens,
+            do_sample=True,
+            temperature=0.7,
+            top_p=0.9,
+            repetition_penalty=1.05,
+            pad_token_id=llm_tokenizer.eos_token_id,
+        )
+    new_ids = out[0, inputs["input_ids"].shape[1]:]
+    return llm_tokenizer.decode(new_ids, skip_special_tokens=True).strip()
+
+
+# ============================================================
 # Lifespan
 # ============================================================
 @asynccontextmanager
@@ -508,6 +550,38 @@ async def lifespan(app: FastAPI):
     else:
         print("[startup] ASR disabled via MV_ASR_ENABLED=0")
 
+    # load LLM (Qwen2.5-Instruct) for the conversation endpoint
+    if LLM_ENABLED:
+        global llm_model, llm_tokenizer
+        try:
+            from transformers import AutoModelForCausalLM, AutoTokenizer
+            print(f"[startup] loading LLM {LLM_MODEL_NAME} with flash_attention_2...")
+            t0 = time.time()
+            llm_tokenizer = AutoTokenizer.from_pretrained(LLM_MODEL_NAME)
+            llm_model = AutoModelForCausalLM.from_pretrained(
+                LLM_MODEL_NAME,
+                torch_dtype=torch.bfloat16,
+                attn_implementation="flash_attention_2",
+                device_map="cuda",
+            )
+            llm_model.eval()
+            print(f"[startup] LLM loaded in {time.time()-t0:.1f}s, "
+                  f"GPU mem total={torch.cuda.memory_allocated()/1e9:.1f}GB")
+            # warmup with a tiny prompt
+            try:
+                _ = _llm_generate_sync(
+                    [{"role": "user", "content": "مرحبا"}], max_new_tokens=8
+                )
+                print("[startup] LLM warmup done")
+            except Exception as e:
+                print(f"[startup] LLM warmup error: {e}")
+        except Exception as e:
+            print(f"[startup] LLM DISABLED — load failed: {e}")
+            llm_model = None
+            llm_tokenizer = None
+    else:
+        print("[startup] LLM disabled via MV_LLM_ENABLED=0")
+
     yield
 
 
@@ -542,6 +616,8 @@ async def health():
         version="1.0.0",
         asr_loaded=asr_model is not None,
         asr_model=ASR_MODEL_NAME if asr_model is not None else None,
+        llm_loaded=llm_model is not None,
+        llm_model=LLM_MODEL_NAME if llm_model is not None else None,
     )
 
 
@@ -563,6 +639,14 @@ async def list_models(_=Depends(require_api_key)):
             description="Premium quality voice cloning. ~334ms TTFA streaming.",
         ),
     ]
+    if llm_model is not None:
+        models.append(ModelInfo(
+            model_id=LLM_MODEL_NAME.split("/")[-1].lower(),
+            name=f"{LLM_MODEL_NAME} (chat backbone for /v1/conversation/ws)",
+            languages=["ar", "en", "multi"],
+            can_clone=False,
+            description="Drives the live conversation endpoint with chat-completion semantics.",
+        ))
     if asr_model is not None:
         models.append(ModelInfo(
             model_id="vibevoice-asr",
@@ -778,6 +862,177 @@ async def transcribe(
         segments=segs,
         generation_ms=round(result["generation_s"] * 1000, 0),
     )
+
+
+# ============================================================
+# Live Conversation (Speech-to-Speech)
+# ============================================================
+@app.websocket("/v1/conversation/ws")
+async def conversation_ws(ws: WebSocket):
+    """Bidirectional voice agent over WebSocket.
+
+    Auth: ?api_key=... query param (since WS can't set headers).
+    Optional query params:
+      - voice_id (default "default")
+      - language (default "ar")
+
+    Client → Server protocol:
+      - Binary frames: PCM16LE @ 16 kHz mono mic chunks
+      - JSON `{"type":"end_of_utterance"}`: triggers ASR → LLM → TTS pipeline
+      - JSON `{"type":"reset"}`: clears conversation history
+      - JSON `{"type":"system","content":"..."}`: override system prompt
+      - JSON `{"type":"interrupt"}`: stop current TTS playback (server discards
+        any in-flight audio for the current turn)
+      - JSON `{"type":"text","content":"..."}`: bypass ASR, send text directly
+
+    Server → Client protocol:
+      - JSON `{"type":"ready"}`: handshake complete
+      - JSON `{"type":"transcript","text":"..."}`: STT finished
+      - JSON `{"type":"response_text","text":"..."}`: LLM finished
+      - JSON `{"type":"audio_meta","sample_rate":24000,"format":"pcm_s16le"}`
+      - Binary frames: PCM16LE @ 24 kHz TTS chunks
+      - JSON `{"type":"turn_done","ttfa_ms":N,"total_ms":N}`
+      - JSON `{"type":"error","message":"..."}`
+    """
+    if API_KEY:
+        token = ws.query_params.get("api_key", "")
+        if token != API_KEY:
+            await ws.close(code=1008)
+            return
+
+    voice_id = ws.query_params.get("voice_id", "default")
+    language = ws.query_params.get("language", "ar")
+
+    if asr_model is None:
+        await ws.close(code=1011)
+        return
+    if llm_model is None:
+        await ws.close(code=1011)
+        return
+
+    await ws.accept()
+    await ws.send_json({"type": "ready", "voice_id": voice_id, "language": language})
+
+    audio_buffer = bytearray()
+    history: list[dict] = [
+        {"role": "system", "content": DEFAULT_SYSTEM_PROMPT}
+    ]
+    interrupt_flag = {"value": False}
+
+    try:
+        while True:
+            msg = await ws.receive()
+            if msg.get("type") == "websocket.disconnect":
+                break
+
+            if "bytes" in msg and msg["bytes"] is not None:
+                audio_buffer.extend(msg["bytes"])
+                continue
+
+            text_msg = msg.get("text")
+            if not text_msg:
+                continue
+            try:
+                data = json.loads(text_msg)
+            except Exception:
+                continue
+
+            mtype = data.get("type")
+            if mtype == "reset":
+                history = [{"role": "system", "content": DEFAULT_SYSTEM_PROMPT}]
+                audio_buffer.clear()
+                await ws.send_json({"type": "ready"})
+            elif mtype == "system":
+                history = [{"role": "system", "content": data.get("content", "")}]
+            elif mtype == "interrupt":
+                interrupt_flag["value"] = True
+            elif mtype == "text":
+                user_text = (data.get("content") or "").strip()
+                if user_text:
+                    interrupt_flag["value"] = False
+                    await _conversation_turn(ws, voice_id, language, user_text, history, interrupt_flag)
+            elif mtype == "end_of_utterance":
+                if not audio_buffer:
+                    continue
+                interrupt_flag["value"] = False
+                pcm = bytes(audio_buffer)
+                audio_buffer.clear()
+
+                # PCM16LE 16kHz mono → float32 → resample to 24kHz for VibeVoice
+                audio_i16 = np.frombuffer(pcm, dtype=np.int16)
+                audio_f32 = audio_i16.astype(np.float32) / 32768.0
+                if INPUT_SAMPLE_RATE != ASR_SAMPLE_RATE:
+                    audio_f32 = librosa.resample(
+                        audio_f32, orig_sr=INPUT_SAMPLE_RATE, target_sr=ASR_SAMPLE_RATE
+                    )
+
+                if len(audio_f32) < 0.2 * ASR_SAMPLE_RATE:
+                    await ws.send_json({"type": "error", "message": "audio too short"})
+                    continue
+
+                loop = asyncio.get_event_loop()
+                stt_result = await loop.run_in_executor(None, _asr_transcribe_sync, audio_f32)
+                user_text = stt_result["text"].strip()
+                await ws.send_json({"type": "transcript", "text": user_text})
+                if not user_text:
+                    continue
+                await _conversation_turn(ws, voice_id, language, user_text, history, interrupt_flag)
+    except WebSocketDisconnect:
+        pass
+    except Exception as e:
+        import traceback
+        traceback.print_exc()
+        try:
+            await ws.send_json({"type": "error", "message": str(e)[:500]})
+        except Exception:
+            pass
+
+
+async def _conversation_turn(
+    ws: WebSocket,
+    voice_id: str,
+    language: str,
+    user_text: str,
+    history: list[dict],
+    interrupt_flag: dict,
+):
+    """Run one turn of: append user → LLM → TTS-stream → append assistant."""
+    turn_start = time.time()
+    history.append({"role": "user", "content": user_text})
+
+    loop = asyncio.get_event_loop()
+    response_text = await loop.run_in_executor(
+        None, lambda: _llm_generate_sync(history, max_new_tokens=256)
+    )
+    response_text = response_text.strip()
+    history.append({"role": "assistant", "content": response_text})
+    await ws.send_json({"type": "response_text", "text": response_text, "language": language})
+
+    if not response_text:
+        await ws.send_json({"type": "turn_done", "total_ms": round((time.time() - turn_start) * 1000)})
+        return
+
+    await ws.send_json({"type": "audio_meta", "sample_rate": SAMPLE_RATE, "format": "pcm_s16le"})
+
+    first_emitted = False
+    ttfa_ms = 0.0
+    chunks = 0
+    async for pcm in _generate_stream(response_text, voice_id, None):
+        if interrupt_flag["value"]:
+            break
+        if not first_emitted:
+            ttfa_ms = (time.time() - turn_start) * 1000
+            first_emitted = True
+        await ws.send_bytes(pcm)
+        chunks += 1
+
+    total_ms = (time.time() - turn_start) * 1000
+    await ws.send_json({
+        "type": "turn_done",
+        "ttfa_ms": round(ttfa_ms),
+        "total_ms": round(total_ms),
+        "chunks": chunks,
+    })
 
 
 @app.websocket("/v1/text-to-speech/{voice_id}/ws")
