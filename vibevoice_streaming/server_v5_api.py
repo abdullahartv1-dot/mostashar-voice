@@ -2590,198 +2590,113 @@ async def conversation_ws(ws: WebSocket):
                     await ws.send_json({"type": "error", "message": "audio too short"})
                     continue
 
-                # FAST PATH: Gemma 4 owns the response. ASR runs in the
-                # BACKGROUND only for chat-bubble display + history record,
-                # and never blocks the audio reply.
-                #
-                # Why: VibeVoice-ASR and Gemma 4 share the same GPU. When
-                # we awaited both in parallel, ASR's ~1.3 s of compute
-                # added GPU contention that slowed Gemma 4 too — total
-                # turn latency hit ~3 s. Moving ASR off the critical
-                # path drops first-audio to ~0.7-1.0 s after EOU.
-                audio_f32_24k = librosa.resample(
-                    audio_f32_16k, orig_sr=INPUT_SAMPLE_RATE,
-                    target_sr=ASR_SAMPLE_RATE,
+                # Save audio first so the chat-bubble player + diagnostics
+                # can find it even if Whisper or Gemma fail later.
+                turn_idx = session_log.next_turn_idx()
+                audio_path = session_log.save_audio(
+                    turn_idx, audio_f32_16k, INPUT_SAMPLE_RATE,
                 )
 
-                # Save audio first (cheap, sync) so we can attach the
-                # transcript to it once ASR finishes.
-                turn_idx = session_log.next_turn_idx()
-                audio_path = session_log.save_audio(turn_idx, audio_f32_16k, INPUT_SAMPLE_RATE)
-
-                # Launch ASR in the background. It will post a transcript
-                # event when ready and update the session log + history.
-                async def _bg_asr_and_emit():
-                    asr_audio = audio_f32_24k
-                    if len(asr_audio) > ASR_MAX_AUDIO_SAMPLES:
-                        asr_audio = asr_audio[-ASR_MAX_AUDIO_SAMPLES:]
-                    # Whisper-only for chat-bubble transcript (per design
-                    # decision — never use VibeVoice-ASR in the live
-                    # conversation path; it has weaker Arabic / dialect
-                    # coverage and would surface as wrong text in the UI).
-                    if whisper_model is None:
-                        # Whisper unavailable → no bubble transcript.
-                        # The Gemma audio path still produces a response
-                        # because it processes audio directly; only the
-                        # display side suffers.
-                        print("[asr-bg] Whisper not loaded; skipping bubble transcript")
-                        return
-                    try:
-                        raw_text = await _whisper_long_audio(audio_f32_16k)
-                    except Exception as e:
-                        print(f"[asr-bg] whisper failed: {e}")
-                        return
-                    clean_text = _clean_asr_text_for_display(raw_text)
-                    if not clean_text:
-                        return
-                    # Surface to the UI (chat bubble) — the `late` flag
-                    # tells the client this transcript landed AFTER the
-                    # response, so it can insert/update accordingly.
-                    # `audio_url` lets the chat render an inline player.
-                    audio_url = (
-                        f"/v1/conversation/sessions/{session_id}/turns/{turn_idx}/audio.wav"
-                    )
-                    try:
-                        await ws.send_json({
-                            "type": "transcript",
-                            "text": clean_text,
-                            "turn": turn_idx,
-                            "audio_url": audio_url,
-                            "late": True,
-                        })
-                    except Exception:
-                        pass
-                    # Patch the most recent user turn in history so the
-                    # NEXT turn's context is actual text, not "[audio]".
-                    for h in reversed(history):
-                        if h.get("role") == "user" and h.get("content") == "[audio]":
-                            h["content"] = clean_text
-                            break
-                    # Update session log row for this turn (rewrite line).
-                    session_log.update_turn_transcript(turn_idx, raw_text)
+                # ============================================================
+                # UNIFIED PIPELINE — applied to ALL audio regardless of length.
+                #
+                #   audio → Whisper-large-v3-turbo (transcribe)
+                #         → Gemma 4 /v1/text-chat (response)
+                #         → VibeVoice-Large (TTS)
+                #
+                # Whisper has higher Arabic + dialect accuracy than Gemma 4's
+                # audio encoder even on short clips, so we send EVERYTHING
+                # through it — no more "Gemma audio path" for ≤ 30 s. This
+                # also collapses the old two-branch design into one and
+                # eliminates the duplicate-bubble class of bugs by structure
+                # (only ONE transcript event is ever emitted per turn).
+                #
+                # No VibeVoice-ASR fallback. No Qwen fallback. On any
+                # failure we surface a clean Arabic error to the UI rather
+                # than silently switching to a model the user didn't pick.
+                # ============================================================
+                if whisper_model is None:
+                    await ws.send_json({
+                        "type": "error",
+                        "message": "Whisper غير مُحمَّل — لا يمكن معالجة الصوت.",
+                    })
+                    continue
+                if not GEMMA4_URL:
+                    await ws.send_json({
+                        "type": "error",
+                        "message": "Gemma 4 غير متاح — لا يمكن توليد ردّ.",
+                    })
+                    continue
 
                 audio_dur_s = len(audio_f32_16k) / INPUT_SAMPLE_RATE
+                n_windows = max(1, int(np.ceil(
+                    audio_dur_s / WHISPER_WINDOW_S
+                )))
+                print(
+                    f"[conversation] turn {turn_idx}: {audio_dur_s:.1f}s "
+                    f"({n_windows} Whisper window(s)) → voice={voice_id}"
+                )
 
-                # Critical path branching:
-                #
-                #   audio ≤ 30 s + Gemma 4 available
-                #       → Gemma owns the reply, bg ASR fills the chat bubble
-                #         in parallel (low-latency, transcript is `late=True`).
-                #
-                #   audio  > 30 s  (Gemma's encoder caps there)
-                #       → chunked ASR (sliding 50 s windows) + Qwen.
-                #         NO bg ASR is spawned — otherwise it would race the
-                #         chunked path and the UI would see TWO transcript
-                #         events for the same turn (= duplicate user bubble).
-                #         This branch ALSO fixes the truncation bug where
-                #         the old fallback used `audio[-55 s:]` and silently
-                #         dropped everything before the last 55 s of speech.
-                gemma_response = None
-                if GEMMA4_URL and audio_dur_s <= 30.0:
-                    # Bg ASR is the chat-bubble path; safe to spawn here
-                    # because audio fits in a single ASR window so it
-                    # won't race a windowed sync ASR.
-                    asyncio.create_task(_bg_asr_and_emit())
-                    try:
-                        gemma_response = await _gemma4_audio_chat(audio_f32_16k, history)
-                    except Exception as e:
-                        print(f"[conversation] Gemma 4 failed: {e}")
-
-                if gemma_response and _looks_arabic(gemma_response):
-                    # Push placeholder user turn into history so the next
-                    # call has the dialog shape; the bg ASR task will
-                    # rewrite "[audio]" to the real transcript when it
-                    # finishes (usually still during this TTS playback).
-                    session_log.record_turn(
-                        turn_idx, audio_path, "", gemma_response,
-                        voice_id=voice_id, path_used="gemma_audio",
-                    )
-                    await _conversation_turn_with_response(
-                        ws, voice_id, language, "[audio]", gemma_response,
-                        history, interrupt_flag,
-                    )
-                else:
-                    # Fallback / long-audio path. Two cases land here:
-                    #   (a) Gemma failed for a short clip — bg ASR is still
-                    #       running, will post a `late` transcript that
-                    #       updates the bubble created here in-place.
-                    #   (b) Audio > 30 s — no bg task was spawned, so the
-                    #       transcript event below is the only one.
-                    if audio_dur_s > 30.0:
-                        print(
-                            f"[conversation] audio is {audio_dur_s:.1f}s > 30s — "
-                            f"using chunked ASR+Qwen ({int(np.ceil(len(audio_f32_24k) / ASR_WINDOW_SAMPLES))} window(s))"
-                        )
-                    else:
-                        print("[conversation] Gemma audio path failed — falling back to Whisper + Gemma text")
-                    # Fixed pipeline (no VibeVoice-ASR, no Qwen — per
-                    # design decision): Whisper for transcript, Gemma 4
-                    # /v1/text-chat for response. If either step fails,
-                    # we surface a clean error to the UI rather than
-                    # silently downgrading to a worse model.
-                    if whisper_model is None:
-                        await ws.send_json({
-                            "type": "error",
-                            "message": "Whisper غير مُحمَّل — لا يمكن معالجة هذا الصوت الطويل.",
-                        })
-                        continue
-                    if not GEMMA4_URL:
-                        await ws.send_json({
-                            "type": "error",
-                            "message": "Gemma 4 غير متاح — لا يمكن توليد ردّ.",
-                        })
-                        continue
-                    try:
-                        raw_text = await _whisper_long_audio(audio_f32_16k)
-                    except Exception as e:
-                        print(f"[conversation] Whisper failed: {e}")
-                        await ws.send_json({
-                            "type": "error",
-                            "message": "تعذّر تحويل الصوت إلى نص (Whisper).",
-                        })
-                        continue
-                    user_text = _clean_asr_text_for_display(raw_text)
-                    if not user_text:
-                        await ws.send_json({
-                            "type": "error",
-                            "message": "لم نستطع التعرّف على كلام في التسجيل (الصوت صامت أو غير واضح).",
-                        })
-                        continue
-                    audio_url = (
-                        f"/v1/conversation/sessions/{session_id}/turns/{turn_idx}/audio.wav"
-                    )
+                # Step 1 — transcribe.
+                try:
+                    raw_text = await _whisper_long_audio(audio_f32_16k)
+                except Exception as e:
+                    print(f"[conversation] Whisper failed: {e}")
                     await ws.send_json({
-                        "type": "transcript",
-                        "text": user_text,
-                        "turn": turn_idx,
-                        "audio_url": audio_url,
+                        "type": "error",
+                        "message": "تعذّر تحويل الصوت إلى نص (Whisper).",
                     })
-                    try:
-                        gemma_resp = await _gemma4_text_chat(user_text, history)
-                    except Exception as e:
-                        print(f"[conversation] Gemma text-chat failed: {e}")
-                        await ws.send_json({
-                            "type": "error",
-                            "message": "تعذّر توليد الردّ من Gemma 4، حاول مجدّداً.",
-                        })
-                        continue
-                    if not gemma_resp or not _looks_arabic(gemma_resp):
-                        await ws.send_json({
-                            "type": "error",
-                            "message": "Gemma 4 أعطى ردّاً غير عربي/فارغ، حاول مجدّداً.",
-                        })
-                        continue
-                    history.append({"role": "user", "content": user_text})
-                    history.append({"role": "assistant", "content": gemma_resp})
-                    await _conversation_turn_with_response(
-                        ws, voice_id, language,
-                        user_text, gemma_resp,
-                        history, interrupt_flag,
-                    )
-                    session_log.record_turn(
-                        turn_idx, audio_path, user_text, gemma_resp,
-                        voice_id=voice_id, path_used="whisper_gemma_text",
-                    )
+                    continue
+                user_text = _clean_asr_text_for_display(raw_text)
+                if not user_text:
+                    await ws.send_json({
+                        "type": "error",
+                        "message": "لم نستطع التعرّف على كلام في التسجيل (الصوت صامت أو غير واضح).",
+                    })
+                    continue
+
+                # Emit transcript IMMEDIATELY — single event, no `late`
+                # flag, no duplicate bubble can ever be created.
+                audio_url = (
+                    f"/v1/conversation/sessions/{session_id}/turns/{turn_idx}/audio.wav"
+                )
+                await ws.send_json({
+                    "type": "transcript",
+                    "text": user_text,
+                    "turn": turn_idx,
+                    "audio_url": audio_url,
+                })
+
+                # Step 2 — generate response via Gemma 4 text-chat.
+                try:
+                    gemma_resp = await _gemma4_text_chat(user_text, history)
+                except Exception as e:
+                    print(f"[conversation] Gemma text-chat failed: {e}")
+                    await ws.send_json({
+                        "type": "error",
+                        "message": "تعذّر توليد الردّ من Gemma 4، حاول مجدّداً.",
+                    })
+                    continue
+                if not gemma_resp or not _looks_arabic(gemma_resp):
+                    await ws.send_json({
+                        "type": "error",
+                        "message": "Gemma 4 أعطى ردّاً غير عربي/فارغ، حاول مجدّداً.",
+                    })
+                    continue
+
+                history.append({"role": "user", "content": user_text})
+                history.append({"role": "assistant", "content": gemma_resp})
+
+                # Step 3 — stream TTS response back.
+                await _conversation_turn_with_response(
+                    ws, voice_id, language,
+                    user_text, gemma_resp,
+                    history, interrupt_flag,
+                )
+                session_log.record_turn(
+                    turn_idx, audio_path, user_text, gemma_resp,
+                    voice_id=voice_id, path_used="whisper_gemma",
+                )
     except WebSocketDisconnect:
         pass
     except Exception as e:
