@@ -1206,7 +1206,35 @@ def _whisper_transcribe_sync(audio_f32_16k: np.ndarray) -> str:
     with torch.no_grad():
         gen_ids = whisper_model.generate(feats, **gen_kwargs)
     text = whisper_processor.batch_decode(gen_ids, skip_special_tokens=True)[0]
-    return text.strip()
+    text = text.strip()
+
+    # Safety net: reject any output that isn't predominantly Arabic.
+    # whisper-large-v3 is reliable on our test corpus, but we can't
+    # rule out the model occasionally slipping into Latin
+    # transliteration on edge cases (loanwords, code-switching, etc).
+    # If the result fails the Arabic-majority check, return "" so the
+    # caller surfaces a clean error to the user instead of letting a
+    # non-Arabic transcript leak through. This is the FINAL hop in the
+    # language-locking chain (after MV_WHISPER_LANGUAGE, language=ar,
+    # and prompt_ids).
+    if WHISPER_LANGUAGE and WHISPER_LANGUAGE.lower() == "ar":
+        if text and not _has_arabic_majority(text):
+            print(f"[whisper] rejected non-Arabic output: {text!r}")
+            return ""
+    return text
+
+
+def _has_arabic_majority(text: str, min_ratio: float = 0.5) -> bool:
+    """True if at least `min_ratio` of letter characters in `text` are
+    Arabic. Used as the final safety net after Whisper transcription.
+    Punctuation, digits, whitespace are ignored — we only count
+    letters. An empty / digits-only string returns False (treated as
+    'not Arabic enough')."""
+    letters = [c for c in text if c.isalpha()]
+    if not letters:
+        return False
+    arabic = sum(1 for c in letters if _ARABIC_RE.match(c))
+    return (arabic / len(letters)) >= min_ratio
 
 
 async def _whisper_long_audio(audio_f32_16k: np.ndarray) -> str:

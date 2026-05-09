@@ -1,0 +1,57 @@
+# Dockerfile.gemma4 — Gemma 4 sidecar (port 8082)
+#
+# Lives in its own image because Gemma 4 needs transformers >= 5.x
+# (the multimodal class) while the main server pins 4.51 for the
+# patched VibeVoice fork. Containerising both side-by-side lets us
+# avoid the pip-conflict dance.
+#
+# Build:
+#   docker build -f infra/Dockerfile.gemma4 -t mostashar-gemma4:v5 .
+# Run:
+#   docker run -d --name gemma4 --gpus all -p 8082:8082 \
+#       -v hf-cache:/workspace/hf-cache \
+#       mostashar-gemma4:v5
+
+FROM nvidia/cuda:12.1.1-cudnn8-runtime-ubuntu22.04
+
+ENV DEBIAN_FRONTEND=noninteractive \
+    PYTHONUNBUFFERED=1 \
+    PYTHONDONTWRITEBYTECODE=1 \
+    PIP_NO_CACHE_DIR=1 \
+    HF_HOME=/workspace/hf-cache
+
+RUN apt-get update && apt-get install -y --no-install-recommends \
+        python3.10 python3.10-venv python3-pip \
+        curl ca-certificates lsof \
+        ffmpeg libsndfile1 \
+    && rm -rf /var/lib/apt/lists/* \
+    && ln -sf /usr/bin/python3.10 /usr/local/bin/python \
+    && ln -sf /usr/bin/python3.10 /usr/local/bin/python3 \
+    && pip install --upgrade pip wheel
+
+WORKDIR /workspace
+
+# Gemma 4 needs the bleeding-edge transformers for AutoModelForMultimodalLM.
+# We accept the larger Python image (~6 GB) over fighting pip resolver hell.
+RUN pip install \
+    'torch==2.4.0' 'torchaudio==2.4.0' \
+    --index-url https://download.pytorch.org/whl/cu121
+
+RUN pip install \
+    'transformers>=5.0,<6.0' 'accelerate>=0.30' \
+    'fastapi>=0.110' 'uvicorn[standard]>=0.27' \
+    'pydantic>=2.0' \
+    'numpy<2' 'soundfile>=0.12' 'librosa>=0.10'
+
+COPY vibevoice_streaming/gemma4_server.py /workspace/gemma4_server.py
+
+VOLUME ["/workspace/hf-cache"]
+EXPOSE 8082
+
+ENV GEMMA4_PORT=8082 \
+    GEMMA4_MODEL=google/gemma-4-E4B-it
+
+HEALTHCHECK --start-period=120s --interval=30s --timeout=5s --retries=3 \
+    CMD curl -fsS "http://127.0.0.1:${GEMMA4_PORT}/health" | grep -q '"loaded": *true' || exit 1
+
+CMD ["python", "/workspace/gemma4_server.py"]

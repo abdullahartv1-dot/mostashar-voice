@@ -1,0 +1,86 @@
+# docker-compose.yml — full Mostashar Voice stack for self-hosted
+# deployment. On RunPod we deploy directly via bootstrap_new_pod.sh
+# (the pod IS already a container — no value in nesting). Use this
+# file when you're moving to AWS / GCP / your own GPU box.
+#
+# Usage:
+#   docker compose up -d                    # start everything
+#   docker compose logs -f vibevoice        # tail server logs
+#   docker compose ps                       # service health
+#   docker compose down                     # stop without deleting volumes
+#   docker compose down -v                  # stop and wipe HF cache (~46 GB)
+#
+# Required environment (read from .env in this directory):
+#   MV_API_KEY          API key clients send via xi-api-key header
+#   PUBLIC_PORT         host port to expose the API on (default 8080)
+#
+# First start: HF cache is empty, so the first ~10 minutes are spent
+# downloading model weights. The volume `hf-cache` persists across
+# `docker compose down` so subsequent restarts are fast.
+
+services:
+  # Main server — VibeVoice-Large + Whisper + ASR + Qwen.
+  vibevoice:
+    build:
+      context: ..
+      dockerfile: infra/Dockerfile.vibevoice
+    image: mostashar-voice:v5
+    container_name: mostashar-vibevoice
+    restart: unless-stopped
+    ports:
+      - "${PUBLIC_PORT:-8080}:8080"
+    environment:
+      MV_API_KEY: ${MV_API_KEY:?MV_API_KEY env var is required}
+      MV_GEMMA4_URL: http://gemma4:8082
+      MV_OPENVOICE_URL: ""           # disabled by default
+      MV_WHISPER_MODEL: openai/whisper-large-v3
+      MV_WHISPER_LANGUAGE: ar
+    volumes:
+      - hf-cache:/workspace/hf-cache
+      - voices:/workspace/refs/voices
+      - sessions:/workspace/conversation_logs
+    deploy:
+      resources:
+        reservations:
+          devices:
+            - driver: nvidia
+              count: 1
+              capabilities: [gpu]
+    depends_on:
+      gemma4:
+        condition: service_healthy
+
+  # Gemma 4 sidecar — separate venv (transformers 5.x) so we don't
+  # have to dual-pin in the main image.
+  gemma4:
+    build:
+      context: ..
+      dockerfile: infra/Dockerfile.gemma4
+    image: mostashar-gemma4:v5
+    container_name: mostashar-gemma4
+    restart: unless-stopped
+    expose:
+      - "8082"
+    environment:
+      GEMMA4_PORT: 8082
+      GEMMA4_MODEL: google/gemma-4-E4B-it
+    volumes:
+      - hf-cache:/workspace/hf-cache
+    deploy:
+      resources:
+        reservations:
+          devices:
+            - driver: nvidia
+              count: 1
+              capabilities: [gpu]
+
+volumes:
+  # Shared HF cache — both services point at it so models aren't
+  # downloaded twice. Total size ~46 GB after first run.
+  hf-cache:
+  # User voice references. Bind-mount this to a host path if you want
+  # to manage voices outside Docker.
+  voices:
+  # Per-WebSocket conversation logs (audio + transcripts). Useful for
+  # debugging and for the /v1/conversation/sessions API.
+  sessions:
