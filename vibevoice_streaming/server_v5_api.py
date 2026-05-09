@@ -87,13 +87,17 @@ from pydantic import BaseModel, Field
 MODEL_NAME = os.environ.get("MV_MODEL", "aoi-ot/VibeVoice-Large")
 ASR_MODEL_NAME = os.environ.get("MV_ASR_MODEL", "microsoft/VibeVoice-ASR")
 ASR_ENABLED = os.environ.get("MV_ASR_ENABLED", "1") not in ("0", "false", "False", "")
-# Whisper for the conversation path's long-audio transcription (>30s).
-# OpenAI's whisper-large-v3-turbo: 809M params, 8× faster than large-v3
-# with near-identical accuracy. Excellent Arabic + dialect coverage —
-# better than VibeVoice-ASR which is multilingual but less specialised.
-# Set MV_WHISPER_ENABLED=0 to disable (long-audio path will fall back
-# to VibeVoice-ASR). Memory cost: ~2 GB VRAM in fp16.
-WHISPER_MODEL_NAME = os.environ.get("MV_WHISPER_MODEL", "openai/whisper-large-v3-turbo")
+# Whisper for the conversation path's transcription. We use the FULL
+# whisper-large-v3 (1.55 B params), not the distilled turbo variant.
+#
+# Why not turbo: empirical testing on Arabic greetings showed turbo
+# transliterates common phrases to Latin script (e.g. "Assalamu alaikum"
+# instead of "السلام عليكم") regardless of language=ar / forced_decoder_ids
+# / Arabic prompt_ids. The full v3 gets it right every time. Cost: ~1
+# extra GB of VRAM and ~300 ms of latency per call — well worth correct
+# Arabic output. Set MV_WHISPER_MODEL=openai/whisper-large-v3-turbo to
+# flip back if needed.
+WHISPER_MODEL_NAME = os.environ.get("MV_WHISPER_MODEL", "openai/whisper-large-v3")
 WHISPER_ENABLED = os.environ.get("MV_WHISPER_ENABLED", "1") not in ("0", "false", "False", "")
 # Default transcription language. "ar" forces Arabic decoding which
 # avoids Whisper's auto-detection occasionally guessing Persian/Urdu
@@ -1179,23 +1183,25 @@ def _whisper_transcribe_sync(audio_f32_16k: np.ndarray) -> str:
         "no_repeat_ngram_size": 3,     # cuts the rare repetition loop
     }
     if WHISPER_LANGUAGE and WHISPER_LANGUAGE.lower() != "auto":
-        # Belt-and-braces language locking. Whisper occasionally emits
-        # English / Persian / Urdu when the speaker uses heavy dialect
-        # — even with `language="ar"` set — because the language token
-        # only biases the first decoded token, not the whole stream.
-        # We additionally compute `forced_decoder_ids` which pins the
-        # language + task tokens at fixed positions of the decoder
-        # input, making non-Arabic decoding effectively impossible.
+        # `language` + `task` are the canonical way to force Whisper
+        # output. Newer transformers internally builds the right
+        # forced_decoder_ids from these — passing both ourselves
+        # actually causes a conflict warning ("forced_decoder_ids will
+        # be ignored in favor of task=transcribe"), so we DON'T set
+        # forced_decoder_ids manually anymore.
         gen_kwargs["language"] = WHISPER_LANGUAGE
         gen_kwargs["task"] = "transcribe"
+        # Optional context prompt — biases the decoder toward Arabic
+        # script. Empirically also speeds up generation slightly
+        # because the language tokens are cached. Skipped silently if
+        # the processor doesn't support `get_prompt_ids` (older HF).
         try:
-            forced = whisper_processor.get_decoder_prompt_ids(
-                language=WHISPER_LANGUAGE, task="transcribe",
-            )
-            gen_kwargs["forced_decoder_ids"] = forced
+            prompt_text = "هذه محادثة بالعربية الفصحى."
+            prompt_ids = whisper_processor.get_prompt_ids(
+                prompt_text, return_tensors="pt",
+            ).to(whisper_model.device)
+            gen_kwargs["prompt_ids"] = prompt_ids
         except Exception:
-            # Older transformers builds may not expose this helper —
-            # the `language` kwarg above still applies.
             pass
     with torch.no_grad():
         gen_ids = whisper_model.generate(feats, **gen_kwargs)
