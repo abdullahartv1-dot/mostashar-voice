@@ -19,6 +19,9 @@ API conventions (mirror ElevenLabs where reasonable):
       WS     /v1/text-to-speech/{voice_id}/ws        → WebSocket (more control)
   - Models:
       GET    /v1/models
+  - STT / Transcription:
+      POST   /v1/speech-to-text         → multipart audio → {"text": "...", "language": "ar"}
+      POST   /v1/transcribe             → multipart audio → {segments, diarization, timestamps}
   - Health:
       GET    /v1/health
   - Docs:
@@ -54,6 +57,22 @@ import numpy as np
 import soundfile as sf
 import librosa
 import torch
+import transformers as _hf
+_hf.logging.set_verbosity_error()
+
+# transformers logger crashes when any config holds a torch.dtype value because
+# it tries to JSON-dump it on logger.info(f"{config}"). Patch json.dumps to
+# stringify torch.dtype rather than raise.
+_orig_json_dumps = json.dumps
+def _safe_json_dumps(obj, **kw):
+    def _default(o):
+        if isinstance(o, torch.dtype):
+            return str(o).replace("torch.", "")
+        raise TypeError(f"Object of type {type(o).__name__} is not JSON serializable")
+    if "default" not in kw:
+        kw["default"] = _default
+    return _orig_json_dumps(obj, **kw)
+json.dumps = _safe_json_dumps
 from fastapi import (
     FastAPI, WebSocket, WebSocketDisconnect, UploadFile, File, Form,
     HTTPException, Header, Depends, Query, Path as PathParam,
@@ -64,9 +83,12 @@ from pydantic import BaseModel, Field
 
 # --- config ---
 MODEL_NAME = os.environ.get("MV_MODEL", "aoi-ot/VibeVoice-Large")
+ASR_MODEL_NAME = os.environ.get("MV_ASR_MODEL", "microsoft/VibeVoice-ASR")
+ASR_ENABLED = os.environ.get("MV_ASR_ENABLED", "1") not in ("0", "false", "False", "")
 DIFFUSION_STEPS = int(os.environ.get("MV_DIFF_STEPS", "15"))
 CFG_SCALE = float(os.environ.get("MV_CFG", "1.8"))
 SAMPLE_RATE = 24000
+ASR_SAMPLE_RATE = 24000  # ASR also expects 24kHz
 DEFAULT_REF = os.environ.get("MV_REF", "/workspace/refs/01.mp3")
 VOICES_DIR = os.environ.get("MV_VOICES_DIR", "/workspace/refs/voices")
 API_KEY = os.environ.get("MV_API_KEY", "")  # if empty, auth is disabled
@@ -75,6 +97,8 @@ os.makedirs(VOICES_DIR, exist_ok=True)
 # --- shared state ---
 processor = None
 model = None
+asr_processor = None
+asr_model = None
 voice_profiles: dict[str, dict] = {}
 
 
@@ -129,6 +153,30 @@ class HealthResponse(BaseModel):
     voices_count: int
     gpu_mem_gb: float
     version: str
+    asr_loaded: bool = False
+    asr_model: Optional[str] = None
+
+
+class TranscriptSegment(BaseModel):
+    start_time: float
+    end_time: float
+    speaker_id: int
+    text: str
+
+
+class STTResponse(BaseModel):
+    text: str
+    language: str = "ar"
+    duration_s: float
+
+
+class TranscribeResponse(BaseModel):
+    text: str
+    language: str = "ar"
+    duration_s: float
+    speakers_count: int
+    segments: list[TranscriptSegment]
+    generation_ms: float
 
 
 # ============================================================
@@ -318,6 +366,74 @@ async def _generate_stream(text: str, voice_id: str, settings: Optional[VoiceSet
 
 
 # ============================================================
+# ASR (Speech-to-Text) — VibeVoice-ASR
+# ============================================================
+def _decode_audio_bytes(audio_bytes: bytes, sr: int = ASR_SAMPLE_RATE) -> np.ndarray:
+    """Decode mp3/wav/m4a/webm/ogg/opus → mono float32 at sr Hz."""
+    buf = io.BytesIO(audio_bytes)
+    try:
+        audio_np, _ = librosa.load(buf, sr=sr, mono=True)
+    except Exception as e:
+        raise HTTPException(400, f"failed to decode audio: {e}")
+    return audio_np
+
+
+def _asr_transcribe_sync(audio_np: np.ndarray) -> dict:
+    """Run VibeVoice-ASR on a single audio array (float32, 24kHz, mono).
+
+    Returns dict with keys: text, segments (list of dicts), generation_s.
+    """
+    if asr_model is None or asr_processor is None:
+        raise HTTPException(503, "ASR model not loaded")
+
+    inputs = asr_processor(
+        audio=[audio_np],
+        sampling_rate=None,
+        return_tensors="pt",
+        padding=True,
+        add_generation_prompt=True,
+    )
+
+    def _to_dev(v):
+        if isinstance(v, torch.Tensor):
+            v = v.to("cuda")
+            if v.dtype == torch.float32:
+                v = v.to(torch.bfloat16)
+        return v
+    inputs = {k: _to_dev(v) for k, v in inputs.items()}
+
+    gen_cfg = {
+        "max_new_tokens": 2048,
+        "do_sample": False,
+        "num_beams": 1,
+        "pad_token_id": asr_processor.pad_id,
+        "eos_token_id": asr_processor.tokenizer.eos_token_id,
+    }
+
+    t0 = time.time()
+    with torch.no_grad():
+        out = asr_model.generate(**inputs, **gen_cfg)
+    gen_s = time.time() - t0
+
+    in_len = inputs["input_ids"].shape[1]
+    gen_ids = out[0, in_len:]
+    eos_pos = (gen_ids == asr_processor.tokenizer.eos_token_id).nonzero(as_tuple=True)[0]
+    if len(eos_pos) > 0:
+        gen_ids = gen_ids[: eos_pos[0] + 1]
+    raw = asr_processor.decode(gen_ids, skip_special_tokens=True)
+    try:
+        segments = asr_processor.post_process_transcription(raw)
+    except Exception:
+        segments = []
+
+    full_text = " ".join(s.get("text", "") for s in segments).strip()
+    if not full_text and raw:
+        # fallback: strip "assistant\n" prefix the model emits
+        full_text = raw.replace("assistant\n", "").strip()
+    return {"text": full_text, "segments": segments, "generation_s": gen_s, "raw": raw}
+
+
+# ============================================================
 # Lifespan
 # ============================================================
 @asynccontextmanager
@@ -349,12 +465,49 @@ async def lifespan(app: FastAPI):
     print(f"[startup] voices loaded: {len(voice_profiles)} ({list(voice_profiles.keys())[:5]}...)")
     print(f"[startup] auth: {'enabled' if API_KEY else 'DISABLED (set MV_API_KEY env to enable)'}")
 
-    # warmup
+    # warmup TTS
     try:
         _ = _generate_full("مرحبا", "default" if "default" in voice_profiles else next(iter(voice_profiles)))
-        print("[startup] warmup done")
+        print("[startup] TTS warmup done")
     except Exception as e:
-        print(f"[startup] warmup error: {e}")
+        print(f"[startup] TTS warmup error: {e}")
+
+    # load ASR (VibeVoice-ASR) — same family as Large, supports 50+ languages incl. ar
+    if ASR_ENABLED:
+        global asr_processor, asr_model
+        try:
+            from vibevoice.modular.modeling_vibevoice_asr import VibeVoiceASRForConditionalGeneration
+            from vibevoice.processor.vibevoice_asr_processor import VibeVoiceASRProcessor
+            print(f"[startup] loading ASR {ASR_MODEL_NAME} with flash_attention_2...")
+            t0 = time.time()
+            asr_processor = VibeVoiceASRProcessor.from_pretrained(
+                ASR_MODEL_NAME, language_model_pretrained_name="Qwen/Qwen2.5-7B"
+            )
+            asr_model = VibeVoiceASRForConditionalGeneration.from_pretrained(
+                ASR_MODEL_NAME,
+                dtype=torch.bfloat16,
+                attn_implementation="flash_attention_2",
+                trust_remote_code=True,
+            )
+            asr_model = asr_model.to(torch.bfloat16).to("cuda")
+            asr_model.config.torch_dtype = torch.bfloat16  # encode_speech reads this
+            asr_model.eval()
+            print(f"[startup] ASR loaded in {time.time()-t0:.1f}s, "
+                  f"GPU mem total={torch.cuda.memory_allocated()/1e9:.1f}GB")
+            # warmup ASR on a tiny silent buffer to compile graphs
+            try:
+                _silent = np.zeros(int(0.5 * ASR_SAMPLE_RATE), dtype=np.float32)
+                _ = _asr_transcribe_sync(_silent)
+                print("[startup] ASR warmup done")
+            except Exception as e:
+                print(f"[startup] ASR warmup error: {e}")
+        except Exception as e:
+            print(f"[startup] ASR DISABLED — load failed: {e}")
+            asr_processor = None
+            asr_model = None
+    else:
+        print("[startup] ASR disabled via MV_ASR_ENABLED=0")
+
     yield
 
 
@@ -387,6 +540,8 @@ async def health():
         voices_count=len(voice_profiles),
         gpu_mem_gb=round(torch.cuda.memory_allocated() / 1e9, 2),
         version="1.0.0",
+        asr_loaded=asr_model is not None,
+        asr_model=ASR_MODEL_NAME if asr_model is not None else None,
     )
 
 
@@ -399,15 +554,29 @@ async def health_legacy(): return await health()
 # ============================================================
 @app.get("/v1/models", response_model=list[ModelInfo], tags=["models"])
 async def list_models(_=Depends(require_api_key)):
-    return [
+    models = [
         ModelInfo(
             model_id="vibevoice-large",
-            name="VibeVoice Large (8B)",
+            name="VibeVoice Large (8B) — TTS",
             languages=["ar", "en", "multilingual"],
             can_clone=True,
             description="Premium quality voice cloning. ~334ms TTFA streaming.",
         ),
     ]
+    if asr_model is not None:
+        models.append(ModelInfo(
+            model_id="vibevoice-asr",
+            name="VibeVoice ASR — Speech-to-Text",
+            languages=["ar", "en", "zh", "es", "pt", "de", "ja", "ko", "fr", "ru",
+                       "id", "sv", "it", "he", "nl", "pl", "no", "tr", "th", "hu",
+                       "ca", "cs", "da", "fa", "af", "hi", "fi", "et", "el", "ro",
+                       "vi", "bg", "is", "sl", "sk", "lt", "sw", "uk", "lv", "hr",
+                       "ne", "sr", "tl", "yi", "ms", "ur", "mn", "hy", "jv", "kl",
+                       "aa"],
+            can_clone=False,
+            description="60-min single-pass STT with diarization, timestamps, hotwords. RTF~0.06.",
+        ))
+    return models
 
 
 # ============================================================
@@ -543,6 +712,72 @@ async def tts_stream(
         "Cache-Control": "no-cache",
     }
     return StreamingResponse(generator(), media_type=media_type, headers=headers)
+
+
+# ============================================================
+# Speech-to-Text (VibeVoice-ASR)
+# ============================================================
+@app.post("/v1/speech-to-text", response_model=STTResponse, tags=["stt"])
+async def speech_to_text(
+    file: UploadFile = File(..., description="Audio file (mp3/wav/m4a/webm/ogg)"),
+    language: str = Form("ar"),
+    _=Depends(require_api_key),
+):
+    """Simple STT — returns plain transcribed text. ElevenLabs-compatible shape.
+
+    For diarization + timestamps + structured output use `/v1/transcribe`.
+    """
+    if asr_model is None:
+        raise HTTPException(503, "ASR not available on this server")
+    audio_bytes = await file.read()
+    audio_np = _decode_audio_bytes(audio_bytes)
+    if len(audio_np) < 0.1 * ASR_SAMPLE_RATE:
+        raise HTTPException(400, "audio too short (<100ms)")
+    loop = asyncio.get_event_loop()
+    result = await loop.run_in_executor(None, _asr_transcribe_sync, audio_np)
+    return STTResponse(
+        text=result["text"],
+        language=language,
+        duration_s=round(len(audio_np) / ASR_SAMPLE_RATE, 2),
+    )
+
+
+@app.post("/v1/transcribe", response_model=TranscribeResponse, tags=["stt"])
+async def transcribe(
+    file: UploadFile = File(..., description="Audio file (mp3/wav/m4a/webm/ogg)"),
+    language: str = Form("ar"),
+    _=Depends(require_api_key),
+):
+    """Full transcription with diarization (who), timestamps (when), and content (what).
+
+    Uses VibeVoice-ASR's structured-JSON output. Up to 60 minutes single-pass.
+    """
+    if asr_model is None:
+        raise HTTPException(503, "ASR not available on this server")
+    audio_bytes = await file.read()
+    audio_np = _decode_audio_bytes(audio_bytes)
+    if len(audio_np) < 0.1 * ASR_SAMPLE_RATE:
+        raise HTTPException(400, "audio too short (<100ms)")
+    loop = asyncio.get_event_loop()
+    result = await loop.run_in_executor(None, _asr_transcribe_sync, audio_np)
+    segs = [
+        TranscriptSegment(
+            start_time=float(s.get("start_time", 0.0)),
+            end_time=float(s.get("end_time", 0.0)),
+            speaker_id=int(s.get("speaker_id", 0)),
+            text=str(s.get("text", "")),
+        )
+        for s in result["segments"]
+    ]
+    speakers_count = len({s.speaker_id for s in segs}) if segs else 0
+    return TranscribeResponse(
+        text=result["text"],
+        language=language,
+        duration_s=round(len(audio_np) / ASR_SAMPLE_RATE, 2),
+        speakers_count=speakers_count,
+        segments=segs,
+        generation_ms=round(result["generation_s"] * 1000, 0),
+    )
 
 
 @app.websocket("/v1/text-to-speech/{voice_id}/ws")

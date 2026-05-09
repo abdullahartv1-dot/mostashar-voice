@@ -36,6 +36,8 @@ For WebSocket endpoint use `?api_key=secret123` query param (browsers can't set 
 | `POST` | `/v1/text-to-speech/{voice_id}` | Generate full WAV (non-streaming) |
 | `POST` | `/v1/text-to-speech/{voice_id}/stream` | Stream PCM via HTTP chunked |
 | `WS` | `/v1/text-to-speech/{voice_id}/ws` | Stream via WebSocket (TTFA + meta) |
+| `POST` | `/v1/speech-to-text` | STT (multipart audio) — plain text |
+| `POST` | `/v1/transcribe` | STT + diarization + timestamps |
 
 Auto-generated Swagger UI: **http://YOUR_HOST/docs**
 
@@ -100,6 +102,45 @@ curl -X POST http://localhost:8080/v1/text-to-speech/default/stream \
 ```
 
 For `output_format=pcm_24000` you receive raw PCM16LE 24kHz; pipe to `aplay -r 24000 -f S16_LE` on Linux.
+
+### 5. Speech-to-Text (simple)
+```bash
+curl -X POST http://localhost:8080/v1/speech-to-text \
+  -H "xi-api-key: secret123" \
+  -F "file=@meeting.mp3" \
+  -F "language=ar"
+```
+
+Response:
+```json
+{ "text": "السلام عليكم. هذا اختبار للنسخ.", "language": "ar", "duration_s": 12.3 }
+```
+
+### 6. Transcribe with diarization + timestamps
+```bash
+curl -X POST http://localhost:8080/v1/transcribe \
+  -H "xi-api-key: secret123" \
+  -F "file=@interview.mp3" \
+  -F "language=ar"
+```
+
+Response:
+```json
+{
+  "text": "كنت مليونير وأنا عمري ستة وعشرين سنة. ستة وعشرين سنة. أي نعم.",
+  "language": "ar",
+  "duration_s": 21.24,
+  "speakers_count": 2,
+  "segments": [
+    {"start_time": 0.0,  "end_time": 2.91, "speaker_id": 0, "text": "كنت مليونير وأنا عمري ستة وعشرين سنة."},
+    {"start_time": 2.91, "end_time": 3.72, "speaker_id": 1, "text": "ستة وعشرين سنة."},
+    {"start_time": 3.72, "end_time": 4.14, "speaker_id": 0, "text": "أي نعم."}
+  ],
+  "generation_ms": 4442
+}
+```
+
+Powered by **VibeVoice-ASR** (Microsoft) — 50 languages, up to 60 min single-pass, RTF ~0.06.
 
 ---
 
@@ -294,9 +335,12 @@ All errors return JSON:
 
 | Metric | Value (RTX PRO 6000) |
 |---|---|
-| TTFA (warm) | ~250-350ms |
-| RTF | ~0.5 (faster than realtime) |
-| GPU mem | ~19GB at rest |
+| **TTS** TTFA (warm) | ~100ms via streaming endpoint |
+| **TTS** RTF | ~0.5 (faster than realtime) |
+| **STT** RTF | ~0.06 (15× faster than realtime) |
+| **STT** wall (20s audio) | ~1.5s |
+| GPU mem (TTS only) | ~19 GB |
+| GPU mem (TTS + ASR) | ~36 GB |
 | Concurrent requests | 1 currently — needs queue/worker for multi-user |
 
 For production deployment with multiple concurrent users, run multiple workers behind a load balancer or use FP8 quantization to fit more workers per GPU.
