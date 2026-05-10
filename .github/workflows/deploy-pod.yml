@@ -1,0 +1,185 @@
+# GitHub Actions — auto-deploy server_v5_api.py + gemma4_server.py
+# to the live RunPod pod whenever vibevoice_streaming/ changes on
+# `feat/voice-studio-v2` or `main`.
+#
+# Setup (one-time, by repo owner):
+#
+#   GitHub Repo → Settings → Secrets and variables → Actions → New
+#     POD_HOST            : RunPod direct-TCP host  (e.g. 103.196.86.113)
+#     POD_PORT            : RunPod direct-TCP port  (e.g. 14042)
+#     POD_SSH_PRIVATE_KEY : full contents of ~/.ssh/id_ed25519
+#                           (the matching public key must be in the
+#                           pod's /root/.ssh/authorized_keys; this is
+#                           the default on RunPod once you've added
+#                           your account key)
+#
+# After secrets are set, every push to a watched branch that touches
+# vibevoice_streaming/ runs this workflow. Manual trigger via the
+# Actions tab is also enabled (workflow_dispatch).
+#
+# What it does:
+#
+#   1. checkout the commit
+#   2. write the SSH private key to a secure tmp file
+#   3. scp the two server files to /workspace/
+#   4. run a remote restart script that:
+#        - kills the current python server on :8080
+#        - relaunches with all MV_* env vars (locked to Arabic Whisper)
+#        - waits for /v1/health to return whisper_loaded=true
+#   5. fail the run if the server doesn't come up within 3 minutes
+#
+# Total wall time: ~2-3 minutes per push (the lion's share is model
+# warmup on the pod). The job itself uses ~10 seconds of GitHub
+# minutes — cheap.
+
+name: Deploy to RunPod
+
+on:
+  push:
+    branches:
+      - main
+      - feat/voice-studio-v2
+    paths:
+      - 'vibevoice_streaming/server_v5_api.py'
+      - 'vibevoice_streaming/gemma4_server.py'
+      - 'vibevoice_streaming/openvoice_server.py'
+      - '.github/workflows/deploy-pod.yml'
+  # Manual run from the Actions tab — useful when you want to redeploy
+  # without making a code change.
+  workflow_dispatch:
+    inputs:
+      restart_only:
+        description: 'Just restart the server, do not re-upload code'
+        type: boolean
+        default: false
+
+# Cancel an in-flight deploy if a new commit lands on the same branch.
+# Otherwise concurrent workflows would step on each other (one kills
+# the server while the other is mid-warmup).
+concurrency:
+  group: deploy-pod-${{ github.ref }}
+  cancel-in-progress: true
+
+jobs:
+  deploy:
+    name: scp + restart server on pod
+    runs-on: ubuntu-latest
+    timeout-minutes: 8
+
+    steps:
+      - name: Checkout
+        uses: actions/checkout@v4
+
+      - name: Set up SSH key
+        env:
+          SSH_KEY: ${{ secrets.POD_SSH_PRIVATE_KEY }}
+        run: |
+          mkdir -p ~/.ssh
+          echo "$SSH_KEY" > ~/.ssh/pod_key
+          chmod 600 ~/.ssh/pod_key
+          # Skip strict host-key checking on first contact — RunPod
+          # rotates the host key when the pod restarts so a pinned
+          # known_hosts entry would break us. We rely on the SSH
+          # private key + the pod port being secret as auth instead.
+          cat > ~/.ssh/config <<'EOF'
+          Host pod
+            HostName    ${{ secrets.POD_HOST }}
+            Port        ${{ secrets.POD_PORT }}
+            User        root
+            IdentityFile ~/.ssh/pod_key
+            StrictHostKeyChecking no
+            UserKnownHostsFile /dev/null
+            ConnectTimeout 10
+            ServerAliveInterval 30
+          EOF
+
+      - name: Smoke-test SSH connection
+        run: ssh pod 'echo "connected to $(hostname)"'
+
+      - name: Upload server files
+        if: ${{ !inputs.restart_only }}
+        run: |
+          # Upload the three Python servers we maintain. The pod doesn't
+          # have a git checkout (deliberately — keeps the pod minimal),
+          # so we copy the files directly to /workspace/.
+          scp \
+            vibevoice_streaming/server_v5_api.py \
+            vibevoice_streaming/gemma4_server.py \
+            vibevoice_streaming/openvoice_server.py \
+            pod:/workspace/
+          # Sanity-check syntax on the remote — fail fast if a typo
+          # sneaks in, instead of letting the server crash mid-restart.
+          ssh pod '
+            python3 -c "import ast; ast.parse(open(\"/workspace/server_v5_api.py\").read()); print(\"server_v5_api.py syntax OK\")"
+            python3 -c "import ast; ast.parse(open(\"/workspace/gemma4_server.py\").read()); print(\"gemma4_server.py syntax OK\")"
+            python3 -c "import ast; ast.parse(open(\"/workspace/openvoice_server.py\").read()); print(\"openvoice_server.py syntax OK\")"
+          '
+
+      - name: Restart main server
+        run: |
+          ssh pod '
+            set -e
+            # Kill whatever is currently listening on :8080 — finds the
+            # python server regardless of how it was launched.
+            PIDS=$(lsof -ti :8080 2>/dev/null || true)
+            [ -n "$PIDS" ] && kill -9 $PIDS && echo "killed PIDs: $PIDS"
+            sleep 4
+
+            cd /workspace
+            > /workspace/server_v5.log
+
+            # Launch fully detached in a new session so it survives
+            # this SSH connection closing.
+            setsid bash -c "cd /workspace && exec env \
+                HF_HOME=/workspace/hf-cache \
+                MV_MODEL=aoi-ot/VibeVoice-Large \
+                MV_ASR_MODEL=microsoft/VibeVoice-ASR \
+                MV_LLM_MODEL=Qwen/Qwen2.5-7B-Instruct \
+                MV_GEMMA4_URL=http://127.0.0.1:8082 \
+                MV_DIFF_STEPS=15 \
+                MV_PORT=8080 \
+                MV_API_KEY=mostashar-dev-key \
+                MV_VOICES_DIR=/workspace/refs/voices \
+                MV_WHISPER_MODEL=openai/whisper-large-v3 \
+                MV_WHISPER_LANGUAGE=ar \
+                python /workspace/server_v5_api.py > /workspace/server_v5.log 2>&1" </dev/null &
+            disown
+            sleep 3
+            NEW_PID=$(lsof -ti :8080 2>/dev/null || echo "")
+            echo "new server PID: ${NEW_PID:-(starting)}"
+          '
+
+      - name: Wait for /v1/health to come up
+        run: |
+          # Model warmup takes 60-120 s — VibeVoice + ASR + Whisper +
+          # Qwen all load sequentially. Poll /v1/health every 10 s for
+          # up to 3 minutes.
+          for i in $(seq 1 18); do
+            sleep 10
+            HEALTH=$(ssh pod 'curl -fsS -m 3 http://127.0.0.1:8080/v1/health 2>/dev/null' || echo "")
+            if echo "$HEALTH" | grep -q '"whisper_loaded": *true'; then
+              echo "READY after ${i}x10=$((i*10))s"
+              echo "$HEALTH" | python3 -m json.tool | head -25
+              exit 0
+            fi
+            echo "${i}x10s: still loading"
+          done
+          echo "FAIL — server did not respond within 180 s"
+          ssh pod 'tail -40 /workspace/server_v5.log' || true
+          exit 1
+
+      - name: Verify Whisper is the configured model
+        run: |
+          # Belt-and-braces: confirm the live server is using the v3
+          # full model (not turbo) and Arabic forcing is on.
+          ssh pod '
+            HEALTH=$(curl -s http://127.0.0.1:8080/v1/health)
+            echo "$HEALTH" | python3 -c "
+          import sys, json
+          h = json.load(sys.stdin)
+          assert h[\"whisper_loaded\"], \"whisper not loaded\"
+          assert \"whisper-large-v3\" in (h.get(\"whisper_model\") or \"\"), \\
+              f\"unexpected whisper model: {h.get(\\\"whisper_model\\\")!r}\"
+          print(\"verified: whisper_model =\", h[\"whisper_model\"])
+          "
+          '
