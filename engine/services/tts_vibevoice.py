@@ -17,9 +17,11 @@ from typing import Optional
 
 import torch
 
-# Pod cuDNN init is broken (CUDNN_STATUS_NOT_INITIALIZED on conv ops).
-# Disable cuDNN — falls back to native CUDA kernels (slower but works).
-torch.backends.cudnn.enabled = False
+# cuDNN was broken on the previous A5000 Pod (CUDNN_STATUS_NOT_INITIALIZED).
+# H100 has working cuDNN — keep it enabled for max throughput. If a future Pod
+# has the same init bug, set VIBEVOICE_DISABLE_CUDNN=1 in the env.
+if os.environ.get("VIBEVOICE_DISABLE_CUDNN") == "1":
+    torch.backends.cudnn.enabled = False
 
 logger = logging.getLogger(__name__)
 
@@ -56,15 +58,9 @@ def _ensure_node(model: str = "VibeVoice-1.5B") -> object:
     if _node is not None and _loaded_model == model:
         return _node
 
-    # VibeVoice-Large is intentionally not allowed: ~8GB / 10 shards that triggers
-    # HF CDN throttling on this Pod and never finishes — leaves partial files.
-    # 1.5B works because shards are smaller and pre-cached.
-    if model == "VibeVoice-Large":
-        raise RuntimeError(
-            "VibeVoice-Large is disabled on this Pod (8GB/10 shards trigger HF CDN "
-            "throttling and never complete; partial downloads fill disk quota). "
-            "Use vibevoice-1.5b instead."
-        )
+    # On older A5000 Pod, VibeVoice-Large was blocked because 8GB / 10 shards triggered
+    # HF CDN throttling and partial downloads filled the 20GB workspace quota. The H100
+    # Pod has 50GB workspace and downloads complete in ~50s — Large is fully supported here.
 
     from nodes.single_speaker_node import VibeVoiceSingleSpeakerNode
     _node = VibeVoiceSingleSpeakerNode()
@@ -72,11 +68,15 @@ def _ensure_node(model: str = "VibeVoice-1.5B") -> object:
         "VibeVoice-1.5B": "microsoft/VibeVoice-1.5B",
         "VibeVoice-Large": "aoi-ot/VibeVoice-Large",  # disabled by disk quota
     }
-    logger.info(f"Loading VibeVoice TTS model: {model}…")
+    # On A5000 without flash-attn, "auto" picks sdpa which has different
+    # bf16 numerics from the HF Space's flash_attention_2 path → garbled output.
+    # "eager" is the reference impl and matches the Space's quality on Arabic.
+    attn = os.environ.get("VIBEVOICE_ATTN", "eager")
+    logger.info(f"Loading VibeVoice TTS model: {model} (attention={attn})…")
     _node.load_model(
         model_name=model,
         model_path=model_paths[model],
-        attention_type="auto",
+        attention_type=attn,
     )
     _loaded_model = model
     return _node
@@ -93,21 +93,20 @@ def clone_vibevoice(
     """Generate cloned audio. Returns path to output WAV."""
     node = _ensure_node(model)
 
-    import soundfile as sf
-    import numpy as np
+    # Match HF Space exactly: librosa @ sr=24000 mono, then (1,1,N) tensor.
+    # Going through soundfile + base_vibevoice's resampler path produces
+    # different output (gibberish on Arabic) even when SR matches.
+    import librosa
+    waveform, _ = librosa.load(reference_audio, sr=24000, mono=True)
+    waveform_tensor = torch.from_numpy(waveform).float().unsqueeze(0).unsqueeze(0)
+    voice_dict = {"waveform": waveform_tensor, "sample_rate": 24000}
 
-    audio, sr = sf.read(reference_audio)
-    if audio.ndim > 1:
-        audio = audio.mean(axis=1)
-    # Space expects (batch, channels, samples) 3D format
-    waveform_in = np.expand_dims(np.expand_dims(audio.astype(np.float32), 0), 0)
-    voice_dict = {"waveform": torch.from_numpy(waveform_in), "sample_rate": sr}
-
+    attn = os.environ.get("VIBEVOICE_ATTN", "eager")
     t0 = time.time()
     (audio_dict,) = node.generate_speech(
         text=text,
         model=model,
-        attention_type="auto",
+        attention_type=attn,
         free_memory_after_generate=False,
         diffusion_steps=diffusion_steps,
         seed=seed,
@@ -129,6 +128,7 @@ def clone_vibevoice(
         waveform = waveform[0]
     if waveform.ndim == 2:
         waveform = waveform[0]
+    import soundfile as sf
     sf.write(out_path, waveform, audio_dict["sample_rate"])
     logger.info(f"VibeVoice TTS done in {elapsed:.1f}s → {out_path}")
     return str(out_path)

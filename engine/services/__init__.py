@@ -27,7 +27,9 @@ def _pyannote(audio_path, segments):
     return diarize_pyannote(audio_path, segments)
 
 
-def _ecapa(audio_path, segments, n_speakers=2):
+def _ecapa(audio_path, segments, n_speakers=None):
+    """n_speakers=None triggers auto-detect via silhouette score (which falls
+    back to k=1 for single-speaker audio)."""
     from .diar_ecapa import diarize_ecapa
     return diarize_ecapa(audio_path, segments, n_speakers)
 

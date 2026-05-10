@@ -35,10 +35,14 @@ def _load():
     )
 
 
-def _pick_best_k(X: np.ndarray, max_k: int = 5) -> int:
+def _pick_best_k(X: np.ndarray, max_k: int = 5, single_speaker_threshold: float = 0.40) -> int:
     """Pick k in [2, min(max_k, n-1)] with highest silhouette score on cosine.
 
-    Falls back to 1 if there are too few embeddings to cluster.
+    Returns 1 if either:
+      - There are too few embeddings to cluster.
+      - The best silhouette score is below `single_speaker_threshold` — the
+        clusters are weak/arbitrary, so the audio is effectively single-speaker
+        and forcing k≥2 would split the same speaker artificially.
     """
     n = len(X)
     if n < 2:
@@ -60,6 +64,10 @@ def _pick_best_k(X: np.ndarray, max_k: int = 5) -> int:
                 best_k, best_score = k, score
         except Exception as e:
             logger.warning(f"Silhouette eval failed at k={k}: {e}")
+    if best_score < single_speaker_threshold:
+        logger.info(f"Single-speaker detected (best silhouette {best_score:.3f} < {single_speaker_threshold})")
+        return 1
+    logger.info(f"Auto-detected {best_k} speakers (silhouette {best_score:.3f})")
     return best_k
 
 

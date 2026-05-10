@@ -2,8 +2,8 @@
 # Opens an SSH tunnel from localhost:8000 to the Pod's engine.
 set -euo pipefail
 
-POD_HOST=${POD_HOST:-194.68.245.175}
-POD_PORT=${POD_PORT:-22133}
+POD_HOST=${POD_HOST:-103.207.149.103}
+POD_PORT=${POD_PORT:-16304}
 LOCAL_PORT=${LOCAL_PORT:-8000}
 
 # Kill existing tunnel on the same local port (best-effort)

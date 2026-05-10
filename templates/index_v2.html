@@ -358,7 +358,19 @@
   <div class="controls-row">
     <button class="btn" id="processBtn" disabled>🚀 معالجة</button>
     <button class="btn btn-secondary" id="loadLongBtn" title="تحميل آخر مقطع طويل تمت معالجته من السكريبت process_long.py">📂 تحميل النتائج الطويلة</button>
+    <button class="btn btn-secondary" id="sessionsBtn" title="عرض كل الجلسات السابقة على الـ Pod">📚 الجلسات السابقة</button>
     <span id="processStatus"></span>
+  </div>
+</div>
+
+<!-- Sessions modal -->
+<div id="sessionsModal" class="hidden" style="position:fixed; inset:0; background:rgba(0,0,0,0.7); z-index:100; display:flex; align-items:center; justify-content:center; padding:20px;">
+  <div style="background:#16202a; border:1px solid #2f3336; border-radius:14px; max-width:900px; width:100%; max-height:85vh; overflow:hidden; display:flex; flex-direction:column;">
+    <div style="padding:16px 20px; border-bottom:1px solid #2f3336; display:flex; justify-content:space-between; align-items:center;">
+      <h2 style="color:#1d9bf0; font-size:1.2em;">📚 الجلسات السابقة</h2>
+      <button class="btn btn-secondary" id="sessionsCloseBtn" style="padding:6px 14px;">✕ إغلاق</button>
+    </div>
+    <div id="sessionsList" style="overflow-y:auto; padding:14px 20px;"></div>
   </div>
 </div>
 
@@ -436,17 +448,17 @@
         <select id="cloneSpeaker"></select>
       </label>
       <label>Diffusion Steps (جودة):
-        <input type="number" id="diffSteps" value="40" min="10" max="100">
+        <input type="number" id="diffSteps" value="60" min="10" max="100">
       </label>
       <label>CFG Scale (دقة):
-        <input type="number" id="cfgScale" value="1.5" min="1" max="3" step="0.1">
+        <input type="number" id="cfgScale" value="1.8" min="1" max="3" step="0.1">
       </label>
       <label>TTS:
         <select id="ttsTool">
-          <option value="vibevoice-1.5b" selected>VibeVoice 1.5B ✓</option>
+          <option value="vibevoice-large" selected>VibeVoice Large 8B ✓ (الأفضل)</option>
+          <option value="vibevoice-1.5b">VibeVoice 1.5B (أسرع، أقل جودة)</option>
           <option value="f5-tts">F5-TTS ✓</option>
           <option value="xtts-v2">XTTS-v2 ✓</option>
-          <option value="vibevoice-large" disabled>VibeVoice Large (معطّل - مساحة)</option>
         </select>
       </label>
       <button class="btn" id="cloneBtn">🎬 توليد الصوت</button>
@@ -611,12 +623,17 @@ function renderResults(data) {
   // Metrics
   drawMetrics(data);
 
-  // Audio player
+  // Audio player — v2 doesn't return audio_url; derive from job_id
   const audio = document.getElementById('audioPlayer');
-  audio.src = fixUrl(data.audio_url);
-  document.getElementById('durationStat').textContent = `⏱️ ${data.duration.toFixed(1)}s`;
-  document.getElementById('timingStat').textContent =
-    `🌍 عربي ${(data.lang_prob*100).toFixed(0)}%`;
+  const audioSrc = data.audio_url
+    ? fixUrl(data.audio_url)
+    : (data.job_id ? `/v2/files/${data.job_id}/audio_16k.wav` : '');
+  audio.src = audioSrc;
+  audio.load();
+  document.getElementById('durationStat').textContent = `⏱️ ${(data.duration || 0).toFixed(1)}s`;
+  document.getElementById('timingStat').textContent = data.lang_prob
+    ? `🌍 عربي ${(data.lang_prob*100).toFixed(0)}%`
+    : (data.tools_used ? `🛠️ ${data.tools_used.stt || ''}` : '');
 
   // Timeline
   drawTimeline(data);
@@ -737,11 +754,16 @@ function drawCloneHistory() {
     totalOutSec += h.output_duration || 0;
     totalChars += h.chars || 0;
   });
-  const rows = hist.map((h, i) => `
+  const rows = hist.map((h, i) => {
+    const audioCell = h.audio_url
+      ? `<audio controls preload="none" src="${escapeHtml(h.audio_url)}" style="height:32px; width:200px;"></audio>`
+      : '—';
+    return `
     <tr>
       <td>#${i + 1}</td>
       <td class="text-cell" title="${escapeHtml(h.text || '')}">${escapeHtml((h.text || '').substring(0, 40))}</td>
       <td>${h.speaker || '—'}</td>
+      <td>${h.tool || '—'}</td>
       <td>${h.chars || 0} ch · ${h.words || 0} w</td>
       <td>${h.diffusion_steps || '—'}</td>
       <td>${(h.cfg_scale || 0).toFixed(1)}</td>
@@ -749,25 +771,27 @@ function drawCloneHistory() {
       <td>${fmtSec(h.output_duration)}</td>
       <td>${(h.rtf || 0).toFixed(2)}x</td>
       <td>${(h.time_per_char_ms || 0).toFixed(0)}ms</td>
-    </tr>`).join('');
+      <td>${audioCell}</td>
+    </tr>`;
+  }).join('');
 
   wrap.innerHTML = `
     <h3 style="color:#1d9bf0; margin-bottom: 8px;">📈 سجل عمليات الاستنساخ (${hist.length})</h3>
     <table class="clone-history-table">
       <thead><tr>
-        <th>#</th><th>النص</th><th>المتحدث</th><th>الحجم</th>
-        <th>Steps</th><th>CFG</th><th>وقت التوليد</th><th>مدة الناتج</th><th>RTF</th><th>زمن/حرف</th>
+        <th>#</th><th>النص</th><th>المتحدث</th><th>الأداة</th><th>الحجم</th>
+        <th>Steps</th><th>CFG</th><th>وقت التوليد</th><th>مدة الناتج</th><th>RTF</th><th>زمن/حرف</th><th>الصوت</th>
       </tr></thead>
       <tbody>${rows}</tbody>
       <tfoot>
         <tr style="font-weight:bold; background:#1c2732;">
-          <td colspan="3">المجموع</td>
+          <td colspan="4">المجموع</td>
           <td>${totalChars} ch</td>
           <td colspan="2">—</td>
           <td>${fmtSec(totalGenSec)}</td>
           <td>${fmtSec(totalOutSec)}</td>
           <td>${totalOutSec > 0 ? (totalGenSec / totalOutSec).toFixed(2) : 0}x</td>
-          <td>—</td>
+          <td colspan="2">—</td>
         </tr>
       </tfoot>
     </table>
@@ -776,7 +800,13 @@ function drawCloneHistory() {
 
 // ======== Timeline ========
 function drawTimeline(data) {
-  const tl = document.getElementById('timeline');
+  // Clone-and-replace removes any previously-attached listeners (drawTimeline can be called many times)
+  const oldTl = document.getElementById('timeline');
+  const tl = oldTl.cloneNode(false);
+  tl.appendChild(document.getElementById('playhead').cloneNode(true));
+  tl.appendChild(document.getElementById('tooltip').cloneNode(true));
+  oldTl.parentNode.replaceChild(tl, oldTl);
+
   const ruler = document.getElementById('ruler');
   const tooltip = document.getElementById('tooltip');
   const dur = data.duration;
@@ -904,6 +934,132 @@ function drawSpeakers(data) {
   });
 }
 
+// ======== Sessions history modal ========
+const sessionsModal = document.getElementById('sessionsModal');
+const sessionsList = document.getElementById('sessionsList');
+
+document.getElementById('sessionsBtn').addEventListener('click', async () => {
+  sessionsModal.classList.remove('hidden');
+  sessionsList.innerHTML = '<div style="text-align:center; padding:30px; color:#8899a6;"><span class="loader"></span> يحمّل الجلسات...</div>';
+  try {
+    const r = await fetch('/v2/api/jobs');
+    const jobs = await r.json();
+    if (!Array.isArray(jobs) || !jobs.length) {
+      sessionsList.innerHTML = '<div style="text-align:center; padding:30px; color:#8899a6;">لا توجد جلسات محفوظة بعد.</div>';
+      return;
+    }
+    sessionsList.innerHTML = jobs.map(j => {
+      const tools = j.tools_used || {};
+      const cost = (j.cost && j.cost.total_usd) || 0;
+      const dur = j.duration || 0;
+      return `
+        <div class="sess-item" data-job-id="${j.id}" style="background:#0f1419; border:1px solid #2f3336; border-radius:10px; padding:12px 16px; margin-bottom:10px; display:flex; justify-content:space-between; align-items:center; flex-wrap:wrap; gap:10px; cursor:pointer; transition: border-color 0.15s;">
+          <div>
+            <div style="color:#1d9bf0; font-family:monospace; direction:ltr; font-size:0.95em;">🆔 ${j.id}</div>
+            <div style="color:#8899a6; font-size:0.85em; margin-top:4px;">
+              📝 STT: <strong style="color:#e7e9ea">${tools.stt || '—'}</strong>
+              · 👥 Diar: <strong style="color:#e7e9ea">${tools.diar || '—'}</strong>
+              · ⏱ ${dur.toFixed(1)}s
+              · 💰 <span style="color:#f4b942; direction:ltr; display:inline-block;">$${cost.toFixed(4)}</span>
+            </div>
+          </div>
+          <button class="btn" data-load-id="${j.id}" style="padding:8px 18px;">تحميل ←</button>
+        </div>`;
+    }).join('');
+    sessionsList.querySelectorAll('[data-load-id]').forEach(btn => {
+      btn.addEventListener('click', e => {
+        e.stopPropagation();
+        loadSession(btn.dataset.loadId);
+      });
+    });
+    sessionsList.querySelectorAll('.sess-item').forEach(it => {
+      it.addEventListener('click', () => loadSession(it.dataset.jobId));
+      it.addEventListener('mouseenter', () => it.style.borderColor = '#1d9bf0');
+      it.addEventListener('mouseleave', () => it.style.borderColor = '#2f3336');
+    });
+  } catch (err) {
+    sessionsList.innerHTML = `<div class="alert alert-error">❌ ${err.message}</div>`;
+  }
+});
+
+document.getElementById('sessionsCloseBtn').addEventListener('click', () => {
+  sessionsModal.classList.add('hidden');
+});
+sessionsModal.addEventListener('click', e => {
+  if (e.target === sessionsModal) sessionsModal.classList.add('hidden');
+});
+
+async function loadSession(jobId) {
+  document.getElementById('processStatus').innerHTML =
+    '<span class="loader"></span> يحمّل الجلسة...';
+  sessionsModal.classList.add('hidden');
+  try {
+    const r = await fetch(`/v2/api/jobs/${jobId}`);
+    if (!r.ok) throw new Error(`HTTP ${r.status}`);
+    const job = await r.json();
+
+    // Normalize persisted job → renderResults shape
+    const data = {
+      job_id: job.id,
+      duration: job.duration || 0,
+      segments: job.segments || [],
+      samples: job.samples || {},
+      timings: job.timings || {},
+      cost: job.cost || {},
+      tools_used: job.tools_used || {},
+      speakers_detected: job.speakers_detected,
+    };
+    CURRENT = data;
+
+    // Restore clone history from persisted clones[]
+    CURRENT._cloneHist = (job.clones || []).map(c => {
+      const chars = (c.text || '').length;
+      const words = (c.text || '').trim().split(/\s+/).filter(Boolean).length;
+      return {
+        text: c.text || '',
+        speaker: c.speaker_id || '—',
+        diffusion_steps: c.diffusion_steps || 0,
+        cfg_scale: c.cfg_scale || 0,
+        elapsed: c.elapsed || 0,
+        output_duration: c.duration || 0,
+        rtf: c.rtf || 0,
+        chars,
+        words,
+        time_per_char_ms: chars > 0 ? Math.round((c.elapsed * 1000) / chars) : 0,
+        connect_time: 0,
+        audio_url: fixUrl(c.audio_url),
+        tool: c.tool,
+      };
+    });
+
+    renderResults(data);
+
+    // Replay session-wide comparison log
+    window.SESSION_RUNS = [];
+    const t = data.timings;
+    const dur = data.duration || 0;
+    if (t.stt_sec) {
+      logRun('STT', data.tools_used.stt || 'stt', `loaded: ${jobId}`,
+        t.stt_sec, t.stt_sec > 0 ? dur / t.stt_sec : 0,
+        (data.cost.stt_usd) || 0, null);
+    }
+    if (t.diar_sec) {
+      logRun('Diar', data.tools_used.diar || 'diar', `loaded: ${jobId}`,
+        t.diar_sec, null, (data.cost.diar_usd) || 0, null);
+    }
+    (job.clones || []).forEach(c => {
+      logRun('TTS', c.tool, c.text || '', c.elapsed || 0,
+        c.rtf > 0 ? 1 / c.rtf : 0, c.cost_usd || 0, fixUrl(c.audio_url));
+    });
+
+    document.getElementById('processStatus').innerHTML =
+      `✅ جلسة ${jobId} محملة (${(job.clones || []).length} استنساخ)`;
+  } catch (err) {
+    document.getElementById('processStatus').innerHTML =
+      `<span style="color:#f5a3a3">❌ فشل تحميل الجلسة: ${err.message}</span>`;
+  }
+}
+
 // ======== Load long results ========
 document.getElementById('loadLongBtn').addEventListener('click', async () => {
   document.getElementById('processStatus').innerHTML =
@@ -939,6 +1095,7 @@ document.getElementById('cloneBtn').addEventListener('click', async () => {
 
   try {
     const ttsTool = document.getElementById('ttsTool').value;
+    const t0 = Date.now();
     const r = await fetch('/v2/api/clone', {
       method: 'POST',
       headers: { 'Content-Type': 'application/json' },
@@ -951,10 +1108,17 @@ document.getElementById('cloneBtn').addEventListener('click', async () => {
         cfg_scale: parseFloat(document.getElementById('cfgScale').value),
       }),
     });
-    const data = await r.json();
-    if (data.error) throw new Error(data.error);
+    const data = await r.json().catch(() => ({}));
+    if (!r.ok || !data.audio_url) {
+      throw new Error(data.error || data.detail || `HTTP ${r.status}`);
+    }
 
     const fixedUrl = fixUrl(data.audio_url);
+    const outDuration = data.duration || 0;
+    const chars = text.length;
+    const words = text.trim().split(/\s+/).filter(Boolean).length;
+    const timePerCharMs = chars > 0 ? Math.round((data.elapsed * 1000) / chars) : 0;
+    const connectTime = ((Date.now() - t0) / 1000 - data.elapsed).toFixed(2);
 
     // Track in history
     if (CURRENT) {
@@ -962,15 +1126,16 @@ document.getElementById('cloneBtn').addEventListener('click', async () => {
       CURRENT._cloneHist.push({
         text: text,
         speaker: document.getElementById('cloneSpeaker').value,
+        tool: ttsTool,
         diffusion_steps: parseInt(document.getElementById('diffSteps').value),
         cfg_scale: parseFloat(document.getElementById('cfgScale').value),
         elapsed: data.elapsed,
-        output_duration: data.output_duration,
+        output_duration: outDuration,
         rtf: data.rtf,
-        chars: data.chars,
-        words: data.words,
-        time_per_char_ms: data.time_per_char_ms,
-        connect_time: data.connect_time,
+        chars,
+        words,
+        time_per_char_ms: timePerCharMs,
+        connect_time: connectTime,
         audio_url: fixedUrl,
       });
       drawCloneHistory();
@@ -982,9 +1147,9 @@ document.getElementById('cloneBtn').addEventListener('click', async () => {
 
     document.getElementById('cloneStatus').innerHTML = `
       <div class="alert alert-info">
-        ✅ تم في <b>${data.elapsed}s</b> (اتصال: ${data.connect_time}s) ·
-        مدة الناتج <b>${data.output_duration}s</b> · RTF: <b>${data.rtf}x</b> ·
-        ${data.chars} حرف · ${data.words} كلمة · ${data.time_per_char_ms}ms/حرف
+        ✅ تم في <b>${data.elapsed}s</b> (اتصال: ${connectTime}s) ·
+        مدة الناتج <b>${outDuration}s</b> · RTF: <b>${data.rtf}x</b> ·
+        ${chars} حرف · ${words} كلمة · ${timePerCharMs}ms/حرف
       </div>
     `;
     const a = document.getElementById('clonedAudio');

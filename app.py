@@ -19,6 +19,15 @@ import torch
 from faster_whisper import WhisperModel
 from flask import Flask, jsonify, request, send_from_directory, render_template
 from gradio_client import Client, handle_file
+
+# Load .env (HF_TOKEN, etc.) without adding python-dotenv as a hard dep
+_envf = Path(__file__).parent / ".env"
+if _envf.exists():
+    for _l in _envf.read_text(encoding="utf-8").splitlines():
+        _l = _l.strip()
+        if _l and not _l.startswith("#") and "=" in _l:
+            _k, _v = _l.split("=", 1)
+            os.environ.setdefault(_k.strip(), _v.strip())
 from sklearn.cluster import AgglomerativeClustering
 from speechbrain.inference.speaker import EncoderClassifier
 
@@ -258,8 +267,15 @@ def api_clone():
 
     try:
         t0 = time.time()
-        client = Client('vibingvoice/vibe-voice-custom-voices')
-        connect_time = time.time() - t0
+        # Prefer local Gradio (H100 Pod via tunnel) for unlimited use; fall back to HF Space.
+        gradio_src = os.environ.get("GRADIO_SRC", "http://127.0.0.1:7860/")
+        try:
+            client = Client(gradio_src)
+            connect_time = time.time() - t0
+        except Exception:
+            _hf_kw = {"token": os.environ["HF_TOKEN"]} if os.environ.get("HF_TOKEN") else {}
+            client = Client('vibingvoice/vibe-voice-custom-voices', **_hf_kw)
+            connect_time = time.time() - t0
 
         t0 = time.time()
         result = client.predict(
@@ -426,46 +442,63 @@ def v2_index():
     return render_template('index_v2.html')
 
 
+def _safe_pod_json(r):
+    """Return Pod's JSON if valid, else a synthetic JSON describing the failure.
+    Prevents Flask's default HTML 500 page from leaking to the v2 UI ('Unexpected token <')."""
+    try:
+        return jsonify(r.json()), r.status_code
+    except Exception as e:
+        return jsonify({"error": f"invalid Pod response (HTTP {r.status_code}): {str(e)[:200]}",
+                        "body_preview": r.text[:300] if hasattr(r, 'text') else ""}), 502
+
+
+def _safe_pod_call(method, path, **kwargs):
+    """Wrap an httpx call so any network/timeout exception returns JSON, not HTML 500."""
+    try:
+        r = method(f"{POD_API}{path}", headers=_pod_headers, **kwargs)
+        return _safe_pod_json(r)
+    except _httpx.TimeoutException as e:
+        return jsonify({"error": f"Pod timeout on {path}: {e}"}), 504
+    except _httpx.ConnectError as e:
+        return jsonify({"error": f"Cannot connect to Pod ({POD_API}): SSH tunnel down? {e}"}), 503
+    except Exception as e:
+        return jsonify({"error": f"Pod call failed on {path}: {type(e).__name__}: {e}"}), 502
+
+
 @app.route('/v2/api/upload', methods=['POST'])
 def v2_upload():
     f = request.files.get('audio') or request.files.get('file')
     if not f:
         return jsonify({"error": "no file"}), 400
     files = {"file": (f.filename, f.stream, f.content_type or "audio/mpeg")}
-    r = _httpx.post(f"{POD_API}/api/upload", files=files, headers=_pod_headers, timeout=120)
-    return jsonify(r.json()), r.status_code
+    return _safe_pod_call(_httpx.post, "/api/upload", files=files, timeout=120)
 
 
 @app.route('/v2/api/process', methods=['POST'])
 def v2_process():
     data = request.json or {}
-    r = _httpx.post(f"{POD_API}/api/process", json=data, headers=_pod_headers, timeout=900)
-    return jsonify(r.json()), r.status_code
+    return _safe_pod_call(_httpx.post, "/api/process", json=data, timeout=900)
 
 
 @app.route('/v2/api/clone', methods=['POST'])
 def v2_clone():
     data = request.json or {}
-    r = _httpx.post(f"{POD_API}/api/clone", json=data, headers=_pod_headers, timeout=600)
-    return jsonify(r.json()), r.status_code
+    return _safe_pod_call(_httpx.post, "/api/clone", json=data, timeout=600)
 
 
 @app.route('/v2/api/jobs')
 def v2_jobs():
-    r = _httpx.get(f"{POD_API}/api/jobs", headers=_pod_headers, timeout=10)
-    return jsonify(r.json()), r.status_code
+    return _safe_pod_call(_httpx.get, "/api/jobs", timeout=10)
 
 
 @app.route('/v2/api/jobs/<job_id>')
 def v2_job(job_id):
-    r = _httpx.get(f"{POD_API}/api/jobs/{job_id}", headers=_pod_headers, timeout=10)
-    return jsonify(r.json()), r.status_code
+    return _safe_pod_call(_httpx.get, f"/api/jobs/{job_id}", timeout=10)
 
 
 @app.route('/v2/api/costs')
 def v2_costs():
-    r = _httpx.get(f"{POD_API}/api/costs", headers=_pod_headers, timeout=10)
-    return jsonify(r.json()), r.status_code
+    return _safe_pod_call(_httpx.get, "/api/costs", timeout=10)
 
 
 @app.route('/v2/files/<path:subpath>')

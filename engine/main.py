@@ -88,15 +88,50 @@ from . import jobs_store
 
 
 def _extract_speaker_samples(wav_path, segments, job_dir):
-    import soundfile as sf, numpy as np
-    audio, sr = sf.read(wav_path)
+    """Extract per-speaker reference clips at 24kHz from the ORIGINAL upload (not the
+    16k STT mix). VibeVoice/F5/XTTS expect 24kHz; sourcing from the original avoids
+    a lossy 16k→24k upsample inside the TTS model."""
+    import soundfile as sf, numpy as np, subprocess, imageio_ffmpeg
+
+    # Find the original upload (orig.mp3, orig.wav, etc.) sitting next to wav_path
+    orig = next((p for p in Path(wav_path).parent.glob("orig.*")), None)
+    src = str(orig) if orig else str(wav_path)
+    target_sr = 24000
+
+    # Decode to mono 24k via ffmpeg (handles mp3/m4a/ogg uniformly)
+    ffmpeg = imageio_ffmpeg.get_ffmpeg_exe()
+    tmp_wav = job_dir / "_extract_24k.wav"
+    subprocess.run(
+        [ffmpeg, "-y", "-i", src, "-ac", "1", "-ar", str(target_sr), str(tmp_wav)],
+        capture_output=True, check=True,
+    )
+    audio, sr = sf.read(str(tmp_wav))
     if audio.ndim > 1:
         audio = audio.mean(axis=1)
+
     by_spk = {}
     for s in segments:
         by_spk.setdefault(s.get("speaker", "SPEAKER_0"), []).append(s)
-    silence = np.zeros(int(0.2 * sr))
+
+    # Single-speaker case: use the WHOLE audio (truncated to ≤30s) as the reference,
+    # not concatenated segments with silence — preserves natural prosody and matches
+    # what v1's HF-Space path does.
     samples = {}
+    if len(by_spk) == 1:
+        sp = next(iter(by_spk))
+        max_samples = int(30 * sr)
+        samp = audio[:max_samples] if len(audio) > max_samples else audio
+        path = job_dir / f"{sp}_sample.wav"
+        sf.write(path, samp, sr)
+        samples[sp] = {"url": f"/files/{job_dir.name}/{path.name}", "duration": round(len(samp)/sr, 2)}
+        try:
+            tmp_wav.unlink()
+        except Exception:
+            pass
+        return samples
+
+    # Multi-speaker case: concatenate the chunks attributed to each speaker.
+    silence = np.zeros(int(0.2 * sr))
     for sp, segs in by_spk.items():
         chunks, total = [], 0.0
         for s in segs[:50]:
@@ -109,6 +144,11 @@ def _extract_speaker_samples(wav_path, segments, job_dir):
         path = job_dir / f"{sp}_sample.wav"
         sf.write(path, samp, sr)
         samples[sp] = {"url": f"/files/{job_dir.name}/{path.name}", "duration": round(len(samp)/sr, 2)}
+
+    try:
+        tmp_wav.unlink()
+    except Exception:
+        pass
     return samples
 
 

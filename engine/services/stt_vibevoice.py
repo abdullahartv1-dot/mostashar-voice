@@ -22,24 +22,24 @@ _model: Optional[VibeVoiceASRForConditionalGeneration] = None
 _processor: Optional[VibeVoiceASRProcessor] = None
 
 
+_CACHE_ROOT = "/workspace/voice-studio-v2/engine/vendor/vibe-voice-custom-voices/vibevoice"
+
+
 def _check_complete_cache() -> Optional[str]:
     """Return error string if VibeVoice ASR shards aren't all locally cached."""
-    hf_home = os.environ.get("HF_HOME", "/workspace/hf-cache")
-    snap_root = Path(hf_home) / "hub" / "models--microsoft--VibeVoice-ASR-HF" / "snapshots"
+    snap_root = Path(_CACHE_ROOT) / "models--microsoft--VibeVoice-ASR-HF" / "snapshots"
     if not snap_root.exists():
         return f"VibeVoice-ASR cache not found at {snap_root}"
     snaps = list(snap_root.iterdir())
     if not snaps:
         return f"No snapshots in {snap_root}"
-    # All 8 shards must be present
     snap = snaps[0]
     needed = [f"model-0000{i}-of-00008.safetensors" for i in range(1, 9)]
     missing = [n for n in needed if not (snap / n).exists()]
     if missing:
         return (
             f"VibeVoice-ASR is incomplete in cache (missing {len(missing)}/8 shards: "
-            f"{missing[0]}…). Re-run the one-shot install script to download all "
-            f"shards before retrying. Skipping to avoid filling disk quota."
+            f"{missing[0]}…). Run snapshot_download to fetch all shards."
         )
     return None
 
@@ -52,9 +52,11 @@ def _load() -> None:
     if err:
         raise RuntimeError(err)
     logger.info("Loading VibeVoice ASR-HF (~5GB model + Qwen 7B = ~20GB VRAM)…")
+    os.environ["HF_HUB_CACHE"] = _CACHE_ROOT
     _processor = VibeVoiceASRProcessor.from_pretrained(
         "microsoft/VibeVoice-ASR-HF",
         language_model_pretrained_name="Qwen/Qwen2.5-7B",
+        cache_dir=_CACHE_ROOT,
     )
     _model = (
         VibeVoiceASRForConditionalGeneration.from_pretrained(
@@ -62,6 +64,7 @@ def _load() -> None:
             dtype=torch.bfloat16,
             attn_implementation="sdpa",
             trust_remote_code=True,
+            cache_dir=_CACHE_ROOT,
         )
         .to("cuda")
         .eval()
@@ -80,7 +83,7 @@ def transcribe_vibevoice(
 
     t0 = time.time()
     inputs = _processor(
-        audio_path=audio_path,
+        audio=audio_path,
         return_tensors="pt",
         padding=True,
         add_generation_prompt=True,

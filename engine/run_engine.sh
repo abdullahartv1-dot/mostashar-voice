@@ -24,6 +24,7 @@ export TMPDIR=/tmp
 mkdir -p /tmp/vs2 || true
 export GRADIO_TEMP_DIR=/tmp/vs2
 export PYTHONUNBUFFERED=1
+export VIBEVOICE_ATTN=flash_attention_2
 
 # Double-fork to fully detach
 (
