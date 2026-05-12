@@ -312,8 +312,17 @@ async def _pump_openai_to_user(
             try:
                 audio_bytes = base64.b64decode(audio_b64)
                 await client_ws.send_bytes(audio_bytes)
-            except Exception:
-                pass
+                # Counter: log every 50 chunks so we can confirm audio is
+                # actually being forwarded. If the user reports "no
+                # response", check this number in /workspace/server_v5.log.
+                if not hasattr(_pump_openai_to_user, "_audio_count"):
+                    _pump_openai_to_user._audio_count = 0  # type: ignore[attr-defined]
+                _pump_openai_to_user._audio_count += 1  # type: ignore[attr-defined]
+                if _pump_openai_to_user._audio_count % 25 == 0:  # type: ignore[attr-defined]
+                    print(f"[realtime] forwarded {_pump_openai_to_user._audio_count} audio chunks "  # type: ignore[attr-defined]
+                          f"({len(audio_bytes)} bytes/last)", flush=True)
+            except Exception as e:  # noqa: BLE001
+                print(f"[realtime] send_bytes failed: {e}", flush=True)
 
         elif et == "response.audio_transcript.delta":
             await client_ws.send_json({

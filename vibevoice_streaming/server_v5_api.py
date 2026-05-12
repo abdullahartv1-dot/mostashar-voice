@@ -812,6 +812,51 @@ def _chunk_to_pcm_bytes(audio_tensor: torch.Tensor) -> bytes:
 # ============================================================
 # Generation (shared between non-streaming + streaming)
 # ============================================================
+# Arabic orthography normalization for VibeVoice TTS.
+# VibeVoice's autoregressive decoder uses periods (.) as chunk boundaries
+# and the Qwen tokenizer expects orthographically-correct Arabic words as
+# single tokens. Without these two rules the model produces
+# Chinese/Persian-sounding gibberish for the first few hundred ms of
+# audio (then "locks in" to Arabic when it hits a period). User reports
+# this as "يتحدث بلغة غير مفهومة في البداية ثم عربي".
+#
+# Empirically verified 2026-05-08: identical settings + reference produce
+# perfect Arabic vs total gibberish purely based on text spelling and
+# punctuation. See ~/.claude/.../vibevoice_arabic_text_rules.md
+_ARABIC_NORMALIZE_RULES = [
+    # 1. Sentence-ending punctuation: Arabic commas → periods so the
+    #    decoder gets proper chunk boundaries. Question + exclamation
+    #    marks already serve as boundaries so we leave them alone.
+    ("،", "."),  # Arabic comma → period
+    ("؛", "."),  # Arabic semicolon → period
+    # 2. Common LLM orthographic mistakes — these specific replacements
+    #    don't change spoken Arabic but they DO change the tokenization,
+    #    which is what fixes the gibberish. Only the few high-frequency
+    #    ones; we don't try to be a full normalizer.
+    ("الان ", "الآن "),     # الآن with hamza
+    (" الان", " الآن"),
+    ("الاصلي", "الأصلي"),
+    ("الاصطناعي", "الاصطناعي"),  # already correct, kept as a marker
+]
+
+
+def _normalize_arabic_for_tts(text: str) -> str:
+    """Apply the orthography + punctuation rules VibeVoice needs.
+
+    Pure string transforms — no model required. Cheap enough to run on
+    every TTS call. The output is meant for VibeVoice ONLY, not for
+    display to the user (which still uses the LLM's original text).
+    """
+    out = text
+    for old, new in _ARABIC_NORMALIZE_RULES:
+        out = out.replace(old, new)
+    # Make sure the string ends with sentence punctuation so the
+    # decoder always has a terminal chunk boundary.
+    if out and out[-1] not in ".!?؟":
+        out = out + "."
+    return out
+
+
 def _format_speaker_text(text: str, speaker: int = 1) -> str:
     """Format text so VibeVoice reads it as one natural-flowing utterance.
 
@@ -928,7 +973,13 @@ def _generate_full(text: str, voice_id: str, settings: Optional[VoiceSettings] =
     profile = _get_voice(voice_id)
     if settings:
         model.set_ddpm_inference_steps(num_steps=settings.diffusion_steps)
-    speaker_text = _format_speaker_text(text)
+    # Normalize Arabic punctuation + orthography before formatting.
+    # Prevents VibeVoice from producing Chinese/Persian-sounding gibberish
+    # at the start of generation. See _normalize_arabic_for_tts docstring.
+    normalized = _normalize_arabic_for_tts(text)
+    if normalized != text:
+        print(f"[tts] normalized: {text[:60]!r} -> {normalized[:60]!r}", flush=True)
+    speaker_text = _format_speaker_text(normalized)
     inputs = processor(
         text=[speaker_text],
         voice_samples=[[profile["ref_audio_np"]]],
@@ -1026,7 +1077,13 @@ async def _generate_stream(text: str, voice_id: str, settings: Optional[VoiceSet
     profile = _get_voice(voice_id)
     if settings:
         model.set_ddpm_inference_steps(num_steps=settings.diffusion_steps)
-    speaker_text = _format_speaker_text(text)
+    # Normalize Arabic punctuation + orthography before formatting.
+    # Prevents VibeVoice from producing Chinese/Persian-sounding gibberish
+    # at the start of generation. See _normalize_arabic_for_tts docstring.
+    normalized = _normalize_arabic_for_tts(text)
+    if normalized != text:
+        print(f"[tts] normalized: {text[:60]!r} -> {normalized[:60]!r}", flush=True)
+    speaker_text = _format_speaker_text(normalized)
     inputs = processor(
         text=[speaker_text],
         voice_samples=[[profile["ref_audio_np"]]],
