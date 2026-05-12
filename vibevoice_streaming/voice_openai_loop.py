@@ -131,12 +131,27 @@ _FIELD_TYPES: Dict[str, Dict[str, Any]] = {
     # Pagination
     "page": {"type": "integer", "minimum": 1},
     "perPage": {"type": "integer", "minimum": 1, "maximum": 100, "default": 10},
-    # Complex (kept loose so OpenAI doesn't try to schematize fully)
+    # Complex (kept loose so OpenAI doesn't try to schematize fully).
+    # OpenAI's tool-schema validator requires every `array` type to declare
+    # `items` — we use a loose {"type": "object"} so we don't have to
+    # enumerate every nested field, while still satisfying the schema.
     "settings": {"type": "object", "description": "Settings dict, {} is OK as default"},
-    "checklist_groups": {"type": "array"},
-    "attendees": {"type": "array"},
-    "reminders": {"type": "array"},
-    "checklist": {"type": "array"},
+    "checklist_groups": {
+        "type": "array", "items": {"type": "object"},
+        "description": "Array of checklist group objects {title, items: [...]}",
+    },
+    "attendees": {
+        "type": "array", "items": {"type": "object"},
+        "description": "Array of attendee objects {workspace_member_id?, client_id?}",
+    },
+    "reminders": {
+        "type": "array", "items": {"type": "object"},
+        "description": "Array of reminder objects {type: 'minutes|hours|days', value: '15'}",
+    },
+    "checklist": {
+        "type": "array", "items": {"type": "object"},
+        "description": "Array of checklist items {title: string, is_completed: bool}",
+    },
 }
 
 
