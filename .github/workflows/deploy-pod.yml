@@ -43,6 +43,12 @@ on:
       - 'vibevoice_streaming/server_v5_api.py'
       - 'vibevoice_streaming/gemma4_server.py'
       - 'vibevoice_streaming/openvoice_server.py'
+      - 'vibevoice_streaming/moshaar_mcp.py'
+      - 'vibevoice_streaming/voice_agent_helpers.py'
+      - 'vibevoice_streaming/voice_agent_prompt.py'
+      - 'vibevoice_streaming/voice_agent_tools.py'
+      - 'vibevoice_streaming/voice_react_loop.py'
+      - 'vibevoice_streaming/voice_session.py'
       - '.github/workflows/deploy-pod.yml'
   # Manual run from the Actions tab — useful when you want to redeploy
   # without making a code change.
@@ -99,20 +105,30 @@ jobs:
       - name: Upload server files
         if: ${{ !inputs.restart_only }}
         run: |
-          # Upload the three Python servers we maintain. The pod doesn't
-          # have a git checkout (deliberately — keeps the pod minimal),
-          # so we copy the files directly to /workspace/.
+          # Upload the three Python servers + the voice-agent support
+          # modules they import (moshaar_mcp.py, voice_agent_*.py,
+          # voice_session.py, voice_react_loop.py). The pod doesn't have
+          # a git checkout (deliberately — keeps the pod minimal), so we
+          # copy the files directly to /workspace/.
           scp \
             vibevoice_streaming/server_v5_api.py \
             vibevoice_streaming/gemma4_server.py \
             vibevoice_streaming/openvoice_server.py \
+            vibevoice_streaming/moshaar_mcp.py \
+            vibevoice_streaming/voice_agent_helpers.py \
+            vibevoice_streaming/voice_agent_prompt.py \
+            vibevoice_streaming/voice_agent_tools.py \
+            vibevoice_streaming/voice_react_loop.py \
+            vibevoice_streaming/voice_session.py \
             pod:/workspace/
           # Sanity-check syntax on the remote — fail fast if a typo
           # sneaks in, instead of letting the server crash mid-restart.
           ssh pod '
-            python3 -c "import ast; ast.parse(open(\"/workspace/server_v5_api.py\").read()); print(\"server_v5_api.py syntax OK\")"
-            python3 -c "import ast; ast.parse(open(\"/workspace/gemma4_server.py\").read()); print(\"gemma4_server.py syntax OK\")"
-            python3 -c "import ast; ast.parse(open(\"/workspace/openvoice_server.py\").read()); print(\"openvoice_server.py syntax OK\")"
+            for f in server_v5_api.py gemma4_server.py openvoice_server.py \
+                     moshaar_mcp.py voice_agent_helpers.py voice_agent_prompt.py \
+                     voice_agent_tools.py voice_react_loop.py voice_session.py; do
+              python3 -c "import ast; ast.parse(open(\"/workspace/$f\").read()); print(\"$f syntax OK\")"
+            done
           '
 
       - name: Restart main server
