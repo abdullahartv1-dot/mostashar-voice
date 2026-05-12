@@ -284,6 +284,9 @@ async def _pump_openai_to_user(
     """Forward OpenAI events + audio to the user, handle function calls."""
     pending_args: Dict[str, str] = {}  # call_id → accumulating JSON args
     event_count = 0
+    # mutable counter; using a list so the closure-like access in the
+    # handler doesn't accidentally rebind a local var
+    _audio_chunks_sent = [0]
 
     try:
         async for raw in openai_ws:
@@ -315,14 +318,15 @@ async def _pump_openai_to_user(
                 # Counter: log every 50 chunks so we can confirm audio is
                 # actually being forwarded. If the user reports "no
                 # response", check this number in /workspace/server_v5.log.
-                if not hasattr(_pump_openai_to_user, "_audio_count"):
-                    _pump_openai_to_user._audio_count = 0  # type: ignore[attr-defined]
-                _pump_openai_to_user._audio_count += 1  # type: ignore[attr-defined]
-                if _pump_openai_to_user._audio_count % 25 == 0:  # type: ignore[attr-defined]
-                    print(f"[realtime] forwarded {_pump_openai_to_user._audio_count} audio chunks "  # type: ignore[attr-defined]
-                          f"({len(audio_bytes)} bytes/last)", flush=True)
+                # Use function-local counter to avoid sharing state
+                # across sessions. Log the first chunk + every 25 after.
+                _audio_chunks_sent[0] += 1
+                if _audio_chunks_sent[0] == 1 or _audio_chunks_sent[0] % 25 == 0:
+                    print(f"[realtime] forwarded audio chunk #{_audio_chunks_sent[0]} "
+                          f"({len(audio_bytes)} bytes)", flush=True)
             except Exception as e:  # noqa: BLE001
                 print(f"[realtime] send_bytes failed: {e}", flush=True)
+                import traceback; traceback.print_exc()
 
         elif et == "response.audio_transcript.delta":
             await client_ws.send_json({

@@ -846,15 +846,47 @@ def _normalize_arabic_for_tts(text: str) -> str:
     Pure string transforms — no model required. Cheap enough to run on
     every TTS call. The output is meant for VibeVoice ONLY, not for
     display to the user (which still uses the LLM's original text).
+
+    Also chunks long text into paragraph-breaks every ~2 sentences so
+    each chunk gets its own `Speaker 1:` line in the prompt. VibeVoice
+    locks into the right Arabic phonemes after the first period, so
+    short Speaker-tagged chunks (one or two sentences each) prevent
+    the model from drifting into Persian-sounding gibberish on long
+    paragraphs. User reported "النص الطويل ينطقه بلغة غير مفهومة" —
+    this is the fix.
     """
     out = text
     for old, new in _ARABIC_NORMALIZE_RULES:
         out = out.replace(old, new)
-    # Make sure the string ends with sentence punctuation so the
-    # decoder always has a terminal chunk boundary.
+    # Guarantee a terminal sentence boundary.
     if out and out[-1] not in ".!?؟":
         out = out + "."
+
+    # Chunk long text: every ~2 sentences becomes its own paragraph
+    # so _format_speaker_text emits multiple `Speaker 1:` lines. That
+    # gives VibeVoice a clean re-anchoring point each time.
+    sentences = _split_arabic_sentences(out)
+    if len(sentences) >= 3:
+        # Group sentences 2-at-a-time, joined into paragraphs separated
+        # by \n\n which _format_speaker_text reads as turn breaks.
+        groups = []
+        for i in range(0, len(sentences), 2):
+            groups.append(" ".join(sentences[i:i + 2]))
+        out = "\n\n".join(groups)
     return out
+
+
+_SENTENCE_SPLIT_RE = re.compile(r"(?<=[.!?؟])\s+")
+
+
+def _split_arabic_sentences(text: str) -> list[str]:
+    """Split Arabic text into sentences on period / question / exclamation.
+
+    Returns sentences that include their terminal punctuation. Empty
+    or whitespace-only segments are dropped.
+    """
+    parts = _SENTENCE_SPLIT_RE.split(text.strip())
+    return [s.strip() for s in parts if s.strip()]
 
 
 def _format_speaker_text(text: str, speaker: int = 1) -> str:
