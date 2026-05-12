@@ -71,8 +71,13 @@ if [ "${SKIP_FLASH_ATTN:-0}" != "1" ]; then
 fi
 
 step "4/6 — VibeVoice community fork (needed for the model class)"
+# Note: the original myshell-ai/VibeVoice-Community repo was deleted in
+# early 2026. The community fork now lives at vibevoice-community/VibeVoice
+# (same Python package layout — drop-in replacement). We also disable
+# git's interactive auth prompt so bootstrap doesn't hang on a non-TTY
+# pod with no GitHub credentials.
 if [ ! -d /workspace/vv-community ]; then
-    git clone https://github.com/myshell-ai/VibeVoice-Community.git /workspace/vv-community
+    GIT_TERMINAL_PROMPT=0 git clone https://github.com/vibevoice-community/VibeVoice.git /workspace/vv-community
 fi
 cd /workspace/vv-community && pip install --quiet -e . && cd "${WORKDIR}"
 
