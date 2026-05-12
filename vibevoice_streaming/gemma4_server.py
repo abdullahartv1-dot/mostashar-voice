@@ -301,7 +301,7 @@ async def _generate_text(system: str, history: list[dict], user_text: str, max_t
 
 @app.post("/v1/text-chat")
 async def text_chat(
-    text: str = Form(..., description="The user's message (already a string — not audio)."),
+    text: str = Form("", description="The user's message (already a string — not audio). Empty allowed when continuing a tool-use ReAct loop."),
     system: Optional[str] = Form(None, description="Override system prompt"),
     history: Optional[str] = Form(
         None, description='JSON list: [{"role":"user","content":"..."}, ...]'
@@ -316,16 +316,26 @@ async def text_chat(
     (Gemma audio) and long-audio (Whisper → Gemma text) paths instead
     of falling through to a different LM (Qwen) that has weaker
     Arabic + dialect coverage.
+
+    Empty `text` is allowed: this happens when the voice-agent ReAct
+    loop wants the model to read the latest tool_result from `history`
+    and synthesize a natural-language response.  We pass a discreet
+    continuation marker that the chat template ignores, so the model
+    answers based on the conversation so far.
     """
     user_text = (text or "").strip()
-    if not user_text:
-        raise HTTPException(400, "text is empty")
     hist: list[dict] = []
     if history:
         try:
             hist = json.loads(history)
         except Exception:
             pass
+    if not user_text:
+        # ReAct continuation — model should respond based on history alone.
+        # Require non-empty history to avoid a totally empty request.
+        if not hist:
+            raise HTTPException(400, "text is empty and history is empty")
+        user_text = "..."  # noqa: harmless continuation cue
     sys_prompt = system or DEFAULT_SYSTEM_PROMPT
     result = await _generate_text(sys_prompt, hist, user_text, max_tokens)
     return JSONResponse({**result, "model": MODEL_ID})
