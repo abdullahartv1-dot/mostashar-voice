@@ -54,6 +54,8 @@ setsid bash -c "cd /workspace && exec env \
     MV_VOICES_DIR='${MV_VOICES_DIR:-/workspace/refs/voices}' \
     MV_WHISPER_MODEL='${MV_WHISPER_MODEL:-openai/whisper-large-v3}' \
     MV_WHISPER_LANGUAGE='${MV_WHISPER_LANGUAGE:-ar}' \
+    MV_LLM_BACKEND='${MV_LLM_BACKEND:-gemma}' \
+    MV_OPENAI_KEY='${MV_OPENAI_KEY:-}' \
     python '${SERVER_PY}' > '${LOG}' 2>&1" </dev/null &
 disown
 sleep 3
