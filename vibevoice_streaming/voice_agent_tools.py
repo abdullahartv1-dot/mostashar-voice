@@ -45,6 +45,18 @@ VOICE_TOOLS: List[VoiceTool] = [
         notes="استدعِ هذي قبل create_task للحصول على workflow_id. خزّن النتيجة في الذاكرة.",
     ),
     VoiceTool(
+        name="list_calendars",
+        purpose_ar="اعرض جميع التقاويم. يُستدعى قبل أي عملية تقويم لجلب calendar_id.",
+        required=[],
+        optional=["search", "type", "perPage"],
+        needs_confirmation=False,
+        example_arabic_intent="(تلقائي قبل list_calendar_sessions أو create_calendar_session)",
+        notes=(
+            "النوع primary = تقويم المستخدم الشخصي، default = تقويم المساحة المشتركة.\n"
+            "خزّن النتيجة في الذاكرة كي لا تكرّر النداء."
+        ),
+    ),
+    VoiceTool(
         name="get_workspace_members",
         purpose_ar="ابحث عن موظف بالاسم لتحويله إلى ID.",
         required=[],
@@ -109,11 +121,20 @@ VOICE_TOOLS: List[VoiceTool] = [
     ),
     VoiceTool(
         name="list_calendar_sessions",
-        purpose_ar="اعرض المواعيد/الجلسات.",
-        required=[],
-        optional=["search", "type", "form_type", "start_date_from", "start_date_to", "perPage"],
+        purpose_ar="اعرض المواعيد/الجلسات. يجب تحديد calendar_id لتجنّب خطأ الخادم.",
+        required=["calendar_id"],
+        optional=["search", "type", "form_type", "start_date", "end_date", "perPage", "is_completed"],
         needs_confirmation=False,
         example_arabic_intent="ايش جدولي اليوم؟ / مواعيدي بكرا",
+        notes=(
+            "calendar_id لازم يكون array من ids: [\"01K...\"], لا تمرّره كنص.\n"
+            "خادم مستشار فيه خلل serialize BigInt إذا استعلمنا كل الجلسات دفعة واحدة، "
+            "فنحن نُجبر تحديد التقويم. استدعِ list_calendars أولاً والتقط الـ primary "
+            "للمستخدم (أو حسب الاسم).\n"
+            "start_date / end_date تنسيق ISO 8601 UTC. perPage<=4 آمن للتقاويم "
+            "التي بها سجلّات فاسدة. للنتائج الأكبر، استخدم start_date+end_date لتضييق "
+            "النطاق."
+        ),
     ),
 
     # ── Mutations (CONFIRMATION REQUIRED) ──
@@ -207,6 +228,7 @@ MUTATION_TOOLS: List[str] = [t.name for t in VOICE_TOOLS if t.needs_confirmation
 # Tools that the agent calls transparently (no confirmation, used to resolve IDs)
 DROPDOWN_TOOLS: List[str] = [
     "get_workflows",
+    "list_calendars",
     "get_workspace_members",
     "get_clients",
 ]

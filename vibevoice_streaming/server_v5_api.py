@@ -1168,12 +1168,18 @@ def _whisper_transcribe_sync(audio_f32_16k: np.ndarray) -> str:
     plausible Arabic phrases when fed near-silent or noise-only audio
     (e.g. "في هذا الحال" from a mic burst). We pre-check for voice
     activity using a simple energy-based VAD and bail out early if
-    < 5 % of the clip has speech-like energy. Cheap (~1 ms) and
+    < 3 % of the clip has speech-like energy. Cheap (~1 ms) and
     eliminates the most common hallucination case in practice.
+
+    Each rejection logs WHICH layer fired so we can debug user reports
+    of "Whisper not working" without having to reproduce the audio.
     """
     if whisper_processor is None or whisper_model is None:
+        print("[whisper] reject: model not loaded")
         return ""
+    dur_s = len(audio_f32_16k) / INPUT_SAMPLE_RATE
     if len(audio_f32_16k) < int(0.2 * INPUT_SAMPLE_RATE):
+        print(f"[whisper] reject: too short ({dur_s*1000:.0f}ms < 200ms)")
         return ""
 
     # Energy-based VAD pre-check.
@@ -1183,11 +1189,20 @@ def _whisper_transcribe_sync(audio_f32_16k: np.ndarray) -> str:
         float(np.sqrt((audio_f32_16k[i*hop : (i+1)*hop] ** 2).mean() + 1e-12))
         for i in range(n_windows)
     ])
-    threshold = max(0.005, float(energies.max()) * 0.1)
+    peak = float(energies.max())
+    # Threshold scales with peak. The 0.003 absolute floor accepts soft
+    # speakers in quiet rooms; the 0.08 relative is forgiving enough not
+    # to reject genuine but brief utterances after a long silent tail.
+    threshold = max(0.003, peak * 0.08)
     voiced_ratio = float((energies > threshold).sum()) / n_windows
-    if voiced_ratio < 0.05:
-        # < 5 % voice activity = essentially silent. Don't waste a
-        # forward pass + don't risk Whisper hallucinating.
+    # Loosened: 3 % minimum (was 5 %). Short utterances like "نعم" can
+    # legitimately have only a few hundred ms of voiced energy in a 1 s
+    # capture window.
+    if voiced_ratio < 0.03:
+        print(
+            f"[whisper] reject: silent ({dur_s:.2f}s, peak={peak:.4f}, "
+            f"voiced={voiced_ratio*100:.1f}% < 3%)"
+        )
         return ""
 
     # Whisper's native input is 30 s — clamp defensively. The caller's
@@ -1246,8 +1261,10 @@ def _whisper_transcribe_sync(audio_f32_16k: np.ndarray) -> str:
     # and prompt_ids).
     if WHISPER_LANGUAGE and WHISPER_LANGUAGE.lower() == "ar":
         if text and not _has_arabic_majority(text):
-            print(f"[whisper] rejected non-Arabic output: {text!r}")
+            print(f"[whisper] reject: non-Arabic output {text!r}")
             return ""
+    if not text:
+        print(f"[whisper] reject: empty output after decode ({len(audio_f32_16k)/INPUT_SAMPLE_RATE:.2f}s in)")
     return text
 
 
@@ -2742,9 +2759,13 @@ async def conversation_ws(ws: WebSocket):
                     continue
                 user_text = _clean_asr_text_for_display(raw_text)
                 if not user_text:
+                    print(
+                        f"[conversation] turn {turn_idx}: Whisper produced empty/rejected "
+                        f"text from {audio_dur_s:.1f}s audio (raw={raw_text!r})"
+                    )
                     await ws.send_json({
                         "type": "error",
-                        "message": "لم نستطع التعرّف على كلام في التسجيل (الصوت صامت أو غير واضح).",
+                        "message": "لم أسمع كلام واضح — حاول تكلّم أعلى وأقرب للمايك.",
                     })
                     continue
 

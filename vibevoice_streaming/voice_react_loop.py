@@ -121,7 +121,64 @@ async def _execute_tool(
                 "error": "غير متصل بـ مستشار."}
 
     args = _normalize_arguments(name, raw_args)
-    return await session.mcp.call_safe(name, args)
+
+    # ── Calendar BigInt workaround ──
+    # Moshaar's list_calendar_sessions throws "Do not know how to serialize
+    # a BigInt" when called without a calendar_id filter, because one
+    # corrupted session record somewhere in the workspace breaks the JSON
+    # serializer. Auto-inject the user's primary calendar so the agent
+    # never has to know about this bug.
+    if name == "list_calendar_sessions":
+        cal_id = args.get("calendar_id")
+        # Force list_calendars if calendar_id missing/invalid
+        if not cal_id or (isinstance(cal_id, list) and not cal_id):
+            await session.get_calendars()
+            pid = session.pick_primary_calendar_id()
+            if pid:
+                args["calendar_id"] = [pid]
+                log.info("[calendar-workaround] auto-injected primary calendar_id=%s", pid)
+        # Coerce scalar string → array (schema requires array)
+        elif isinstance(cal_id, str):
+            args["calendar_id"] = [cal_id]
+        # Cap perPage to a safe value to avoid the corrupted-record bug
+        # when the user's primary calendar has buggy data past row 4.
+        pp = args.get("perPage")
+        if not isinstance(pp, int) or pp > 10:
+            args["perPage"] = 10
+
+    envelope = await session.mcp.call_safe(name, args)
+
+    # ── BigInt second-pass retry ──
+    # Even with calendar_id, the user's primary calendar may hit a
+    # corrupted session past row 4. If we see the BigInt error, retry
+    # with perPage=4 (known-good slice).
+    if name == "list_calendar_sessions" and not envelope.get("ok"):
+        err = str(envelope.get("error", ""))
+        # Tool returned 200 but wrapped success=false
+        if not err and isinstance(envelope.get("data"), dict):
+            inner = envelope["data"]
+            if inner.get("success") is False:
+                err = str(inner.get("error", ""))
+        # Also check unwrapped tool-text errors
+        if "BigInt" in err or "BigInt" in json.dumps(envelope, ensure_ascii=False):
+            if args.get("perPage", 10) > 4:
+                args["perPage"] = 4
+                log.info("[calendar-workaround] retrying with perPage=4 after BigInt error")
+                envelope = await session.mcp.call_safe(name, args)
+
+    # Also detect inner success=false BigInt for OK envelope (call_safe
+    # returns ok=True even when Moshaar replies success=false because
+    # the JSON-RPC layer succeeded).
+    if (name == "list_calendar_sessions" and envelope.get("ok")
+            and isinstance(envelope.get("data"), dict)
+            and envelope["data"].get("success") is False
+            and "BigInt" in str(envelope["data"].get("error", ""))):
+        if args.get("perPage", 10) > 4:
+            args["perPage"] = 4
+            log.info("[calendar-workaround] retrying (success=false BigInt) with perPage=4")
+            envelope = await session.mcp.call_safe(name, args)
+
+    return envelope
 
 
 # ──────────────────────────────────────────────────────────────────────────

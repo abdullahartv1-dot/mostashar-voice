@@ -140,6 +140,35 @@ class VoiceSession:
             self.cached_members = members
         return members
 
+    async def get_calendars(self, force: bool = False) -> List[Dict[str, Any]]:
+        """Cached calendars lookup. Used to auto-inject calendar_id into
+        list_calendar_sessions, which fails server-side with BigInt error
+        when no calendar_id filter is provided."""
+        if self.cached_calendars is not None and not force:
+            return self.cached_calendars
+        if not await self.ensure_mcp():
+            return []
+        result = await self.mcp.call_safe("list_calendars", {"perPage": 100})
+        if not result.get("ok"):
+            return []
+        calendars = _extract_list(result["data"], "calendars") or _extract_list(result["data"], "data") or []
+        self.cached_calendars = calendars
+        return calendars
+
+    def pick_primary_calendar_id(self) -> Optional[str]:
+        """Return the user's primary calendar id (type='primary' for current user),
+        falling back to the default workspace calendar, then the first one."""
+        if not self.cached_calendars:
+            return None
+        # Prefer 'primary' type — that's the personal calendar
+        for c in self.cached_calendars:
+            if c.get("type") == "primary":
+                return c.get("id")
+        for c in self.cached_calendars:
+            if c.get("type") == "default":
+                return c.get("id")
+        return self.cached_calendars[0].get("id") if self.cached_calendars else None
+
     # ───────────────────────────────────────────────────────────────────
     # History management
     # ───────────────────────────────────────────────────────────────────
