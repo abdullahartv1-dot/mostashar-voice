@@ -109,12 +109,20 @@ PYEOF
 
 step "6/6 — voice references"
 mkdir -p "${VOICES_DIR}"
-if [ -z "$(ls -A "${VOICES_DIR}" 2>/dev/null)" ]; then
-    echo "No voices found. To migrate the library from another pod:"
-    echo "  scp -r OLD_POD:/workspace/refs/voices/ ${VOICES_DIR}/"
-    echo "Then rerun: bash ${REPO_DIR}/infra/start_server.sh"
+# Seed the library from the repo's bundled voices on first deploy.
+# Subsequent runs leave the live library untouched (user uploads
+# via /v1/voices/add stay safe).  All canonical voices ship as .wav
+# (24 kHz mono PCM-16), so the startup auto-discover picks them up.
+REPO_VOICES="${REPO_DIR}/refs/voices"
+if [ -d "${REPO_VOICES}" ] && [ -z "$(ls -A "${VOICES_DIR}" 2>/dev/null)" ]; then
+    echo "Seeding voice library from ${REPO_VOICES}..."
+    cp "${REPO_VOICES}"/*.wav "${VOICES_DIR}/" 2>/dev/null || true
+    echo "  -> $(ls "${VOICES_DIR}" 2>/dev/null | wc -l) voice files copied"
+elif [ -n "$(ls -A "${VOICES_DIR}" 2>/dev/null)" ]; then
+    echo "$(ls "${VOICES_DIR}" | wc -l) voice files already present (preserved)"
 else
-    echo "$(ls "${VOICES_DIR}" | wc -l) voice files already present"
+    echo "No bundled voices in repo and live library is empty."
+    echo "Migrate from old pod: scp -r OLD_POD:/workspace/refs/voices/ ${VOICES_DIR}/"
 fi
 
 step "DONE"

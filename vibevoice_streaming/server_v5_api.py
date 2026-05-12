@@ -1198,8 +1198,13 @@ def _whisper_transcribe_sync(audio_f32_16k: np.ndarray) -> str:
     )
     # Whisper expects float16 features matching the model dtype.
     feats = inputs.input_features.to("cuda", dtype=torch.float16)
+    # Whisper has max_target_positions=448. The Arabic prompt below
+    # eats ~20 tokens, plus 4 special tokens (start/lang/task/sot), so
+    # we cap max_new_tokens at 420 to leave headroom and avoid the
+    # "exceeds the `max_target_positions` of the Whisper model: 448"
+    # runtime error that crashes the conversation flow.
     gen_kwargs: dict = {
-        "max_new_tokens": 440,         # ~30 s of speech worst-case
+        "max_new_tokens": 420,         # 420 + ~28 prompt+special = 448 limit
         "num_beams": 1,                # greedy for speed; quality stays high
         "do_sample": False,
         "no_repeat_ngram_size": 3,     # cuts the rare repetition loop

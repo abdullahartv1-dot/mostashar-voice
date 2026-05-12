@@ -118,7 +118,7 @@ async def _execute_tool(
 
     if not session.mcp:
         return {"ok": False, "kind": "no_mcp",
-                "error": "غير متصل بـ موسحار."}
+                "error": "غير متصل بـ مستشار."}
 
     args = _normalize_arguments(name, raw_args)
     return await session.mcp.call_safe(name, args)
