@@ -20,12 +20,45 @@ loop. MV_LLM_BACKEND=gemma (the default) keeps the legacy ReAct path.
 
 from __future__ import annotations
 
+import asyncio
 import json
 import logging
 import os
+import re
 from typing import Any, Dict, List, Optional
 
 import httpx
+
+
+# Patterns that suggest the model is giving up instead of using its
+# tools. When we see this on the first text-only response of a turn,
+# we inject a "keep going" nudge and let the loop continue. Detected
+# from real ChatGPT bail-outs in user feedback.
+_GIVING_UP_PATTERNS = [
+    # "I need to know which X first"
+    r"أحتاج\s+(?:أن\s+أعرف|أولاً|إلى\s+معرفة)",
+    # "Which X do you want"
+    r"أي\s+(?:تقويم|قضية|مهمة|عميل|تقاويم)\s+(?:ترغب|تريد|تحب|تخت)",
+    # "Please specify / clarify"
+    r"(?:يرجى|من\s+فضلك)\s+(?:توضيح|تحديد|التحديد)",
+    # English fallbacks
+    r"(?:i\s+(?:need|don'?t|can'?t)\s+know|please\s+(?:specify|clarify))",
+    # "I can't"
+    r"(?:لا\s+أستطيع|لا\s+يمكنني|لست\s+قادرة)",
+]
+_GIVING_UP_RE = re.compile("|".join(_GIVING_UP_PATTERNS), re.IGNORECASE)
+
+
+def _looks_like_giving_up(text: str) -> bool:
+    """True if the response looks like the model bailed instead of using
+    tools. Used to inject a 'keep going' nudge into the loop."""
+    if not text:
+        return False
+    # Short responses (under 5 words) without action words almost always
+    # mean the model is asking for clarification.
+    if len(text.split()) < 4 and "؟" in text:
+        return True
+    return bool(_GIVING_UP_RE.search(text))
 
 try:
     from voice_agent_prompt import build_system_prompt, classify_confirmation  # type: ignore[no-redef]
@@ -369,21 +402,60 @@ async def run_voice_turn_openai(
 
     tool_events: List[Dict[str, Any]] = []
     final_text = ""
+    consecutive_api_errors = 0
+    nudged_once = False  # we only inject the "keep going" nudge once
 
-    for iteration in range(max_iterations):
+    iteration = 0
+    while iteration < max_iterations:
+        iteration += 1
         messages = _history_to_openai_messages(session, system_prompt)
         try:
             msg = await _call_openai(messages, tools=tools, max_tokens=400)
+            consecutive_api_errors = 0
         except Exception as e:
-            log.warning("openai call failed iter=%d: %s", iteration, e)
-            final_text = "اعتذار، تعذّر توليد الرد. حاول مرة أخرى."
-            break
+            consecutive_api_errors += 1
+            log.warning("openai call failed iter=%d (try %d/3): %s",
+                        iteration, consecutive_api_errors, e)
+            if consecutive_api_errors >= 3:
+                # Genuinely broken — but DON'T poison the session history
+                # with a failure message. The user can ask again on the
+                # next turn and the session stays alive.
+                final_text = ("اعتذار، الخدمة بطيئة جداً الآن. "
+                              "حاول الطلب مرة ثانية بعد قليل.")
+                break
+            # Short backoff then retry the SAME iteration (don't burn
+            # the iteration budget on transient network blips).
+            await asyncio.sleep(1.5 * consecutive_api_errors)
+            iteration -= 1  # retry doesn't count against the budget
+            continue
 
         tool_calls = msg.get("tool_calls") or []
         content = (msg.get("content") or "").strip()
 
         if not tool_calls:
-            # Plain text response — we're done
+            # No tool call — either the task is done OR the model is
+            # giving up too early (asking for clarification it shouldn't
+            # need, or saying it can't help). Detect the giving-up
+            # pattern ONCE and nudge it to keep going; the second time
+            # we trust the response is genuinely a final answer.
+            if not nudged_once and _looks_like_giving_up(content) and tools:
+                nudged_once = True
+                print(f"[openai-loop] nudging model — looks like premature bail: "
+                      f"{content[:80]!r}", flush=True)
+                # Push the model's bail as an assistant turn, then add a
+                # system nudge that tells it to use the tools instead of
+                # asking the user.
+                session.history.append({"role": "assistant", "content": content})
+                session.history.append({
+                    "role": "user",  # tagged as user so it shows in dialog
+                    "content": (
+                        "(تعليمات نظام: لا تطلبي توضيحاً. استخدمي الأدوات "
+                        "المتاحة لمحاولة إنجاز الطلب أولاً. إذا كان طلبي "
+                        "'كل X' فاستدعي الأداة list_X مباشرة وتعاملي مع كل "
+                        "العناصر، لا تسألي أيها أختار.)"
+                    ),
+                })
+                continue
             final_text = content or "تمام."
             session.push_assistant(final_text)
             break
