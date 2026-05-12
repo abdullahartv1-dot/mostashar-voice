@@ -77,6 +77,21 @@ except Exception as _e:  # noqa: BLE001
     run_voice_turn = None  # type: ignore[assignment]
     _MCP_INTEGRATION_AVAILABLE = False
 
+# OpenAI backend (optional). Set MV_LLM_BACKEND=openai to switch from
+# Gemma 4 ReAct to OpenAI's native function calling. Requires MV_OPENAI_KEY
+# env var on the pod. The OpenAI loop re-uses the same MCP execute_tool /
+# summarize_result so the BigInt workaround and field whitelist still apply.
+try:
+    try:
+        from voice_openai_loop import run_voice_turn_openai  # type: ignore[no-redef]
+    except ImportError:
+        from .voice_openai_loop import run_voice_turn_openai
+    _OPENAI_BACKEND_AVAILABLE = True
+except Exception as _e:  # noqa: BLE001
+    print(f"[openai] backend module unavailable: {_e}")
+    run_voice_turn_openai = None  # type: ignore[assignment]
+    _OPENAI_BACKEND_AVAILABLE = False
+
 import numpy as np
 import soundfile as sf
 import librosa
@@ -133,6 +148,17 @@ LLM_ENABLED = os.environ.get("MV_LLM_ENABLED", "1") not in ("0", "false", "False
 # understanding so no transcript drift). Set MV_GEMMA4_URL="" to force
 # the fallback path.
 GEMMA4_URL = os.environ.get("MV_GEMMA4_URL", "http://127.0.0.1:8082")
+# Which LLM backend powers the voice agent's tool-calling loop:
+#   "gemma"  — local Gemma 4 sidecar with hand-rolled ReAct <tool> tags
+#   "openai" — OpenAI gpt-4o-mini with native function calling
+# Both share the same MCP integration (voice_react_loop._execute_tool +
+# _summarize_result), only the LLM piece differs. OpenAI tends to be
+# more reliable on Arabic + tool calling but costs ~$0.15/M input tokens.
+# Gemma is free but slightly less consistent. Set on the pod via env.
+LLM_BACKEND = os.environ.get("MV_LLM_BACKEND", "gemma").lower().strip()
+if LLM_BACKEND not in ("gemma", "openai"):
+    print(f"[backend] unknown MV_LLM_BACKEND={LLM_BACKEND!r}, defaulting to gemma")
+    LLM_BACKEND = "gemma"
 # OpenVoice v2 sidecar — applies a clarity-of-articulation donor's
 # acoustic characteristics to an uploaded reference at clone time. Set
 # MV_OPENVOICE_URL="" to disable (clone uses the raw upload as-is).
@@ -490,6 +516,11 @@ class HealthResponse(BaseModel):
     whisper_model: Optional[str] = None
     llm_loaded: bool = False
     llm_model: Optional[str] = None
+    # Which LLM powers the voice-agent tool-calling loop.
+    # "gemma" — local Gemma 4 sidecar with ReAct
+    # "openai" — gpt-4o-mini with native function calling
+    llm_backend: str = "gemma"
+    openai_key_configured: bool = False
     # Sidecars are optional dependencies; their absence degrades but
     # doesn't break the main service (cloning falls back to raw upload,
     # conversations fall back to ASR + Qwen).
@@ -1531,6 +1562,15 @@ async def lifespan(app: FastAPI):
 
     print(f"[startup] voices loaded: {len(voice_profiles)} ({list(voice_profiles.keys())[:5]}...)")
     print(f"[startup] auth: {'enabled' if API_KEY else 'DISABLED (set MV_API_KEY env to enable)'}")
+    # Show which backend serves the voice agent (Gemma vs OpenAI). Helps
+    # the operator spot mis-configuration: OPENAI selected but key missing.
+    openai_key_present = bool(os.environ.get("MV_OPENAI_KEY", "").strip())
+    backend_status = LLM_BACKEND
+    if LLM_BACKEND == "openai":
+        backend_status += " (key=set)" if openai_key_present else " (key=MISSING — will fall back to gemma)"
+    elif openai_key_present:
+        backend_status += " (openai key present but MV_LLM_BACKEND=gemma)"
+    print(f"[startup] voice-agent LLM backend: {backend_status}")
 
     # warmup TTS
     try:
@@ -1717,6 +1757,8 @@ async def health():
         whisper_model=WHISPER_MODEL_NAME if whisper_model is not None else None,
         llm_loaded=llm_model is not None,
         llm_model=LLM_MODEL_NAME if llm_model is not None else None,
+        llm_backend=LLM_BACKEND,
+        openai_key_configured=bool(os.environ.get("MV_OPENAI_KEY", "").strip()),
         gemma4=gemma_h,
         openvoice=ov_h,
     )
@@ -2872,25 +2914,37 @@ async def _voice_chat_or_react(
 
     Also emits tool/confirmation events on `ws` if provided.
     """
-    if (voice_session is not None
-            and voice_session.mcp_connected
-            and run_voice_turn is not None):
-        async def _gemma(sp, h, ut, mt):
-            return await _gemma4_text_chat(ut, h, system_prompt=sp, max_tokens=mt)
-        result = await run_voice_turn(
-            user_text=user_text,
-            session=voice_session,
-            gemma_call=_gemma,
-        )
-        if ws is not None:
+    if voice_session is not None and voice_session.mcp_connected:
+        # Pick the backend per the MV_LLM_BACKEND env. If OpenAI is
+        # requested but the module didn't load (e.g. missing httpx) OR
+        # the key isn't set, fall back to Gemma so we never break a live
+        # session — log it once so the operator notices.
+        result = None
+        if LLM_BACKEND == "openai" and _OPENAI_BACKEND_AVAILABLE:
+            try:
+                result = await run_voice_turn_openai(
+                    user_text=user_text, session=voice_session,
+                )
+            except Exception as e:
+                print(f"[backend] openai failed, falling back to gemma: {e}")
+                result = None
+        if result is None and run_voice_turn is not None:
+            async def _gemma(sp, h, ut, mt):
+                return await _gemma4_text_chat(ut, h, system_prompt=sp, max_tokens=mt)
+            result = await run_voice_turn(
+                user_text=user_text,
+                session=voice_session,
+                gemma_call=_gemma,
+            )
+        if ws is not None and result is not None:
             for ev in result.tool_events:
                 try:
                     await ws.send_json({"type": ev.get("type", "tool_event"), **ev})
                 except Exception:
                     pass
-        return result.text
+        return result.text if result is not None else ""
 
-    # Fallback: legacy single-shot chat (no MCP)
+    # No-MCP fallback: legacy single-shot Gemma chat
     return await _gemma4_text_chat(user_text, history)
 
 

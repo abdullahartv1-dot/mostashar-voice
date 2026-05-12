@@ -48,6 +48,7 @@ on:
       - 'vibevoice_streaming/voice_agent_prompt.py'
       - 'vibevoice_streaming/voice_agent_tools.py'
       - 'vibevoice_streaming/voice_react_loop.py'
+      - 'vibevoice_streaming/voice_openai_loop.py'
       - 'vibevoice_streaming/voice_session.py'
       - '.github/workflows/deploy-pod.yml'
   # Manual run from the Actions tab — useful when you want to redeploy
@@ -119,6 +120,7 @@ jobs:
             vibevoice_streaming/voice_agent_prompt.py \
             vibevoice_streaming/voice_agent_tools.py \
             vibevoice_streaming/voice_react_loop.py \
+            vibevoice_streaming/voice_openai_loop.py \
             vibevoice_streaming/voice_session.py \
             pod:/workspace/
           # Sanity-check syntax on the remote — fail fast if a typo
@@ -126,44 +128,62 @@ jobs:
           ssh pod '
             for f in server_v5_api.py gemma4_server.py openvoice_server.py \
                      moshaar_mcp.py voice_agent_helpers.py voice_agent_prompt.py \
-                     voice_agent_tools.py voice_react_loop.py voice_session.py; do
+                     voice_agent_tools.py voice_react_loop.py voice_openai_loop.py \
+                     voice_session.py; do
               python3 -c "import ast; ast.parse(open(\"/workspace/$f\").read()); print(\"$f syntax OK\")"
             done
           '
 
       - name: Restart main server
+        env:
+          # Optional: switch the voice agent to OpenAI's native function
+          # calling. Set MV_LLM_BACKEND to "openai" + OPENAI_API_KEY as a
+          # repo secret to enable. Left empty → falls back to local Gemma.
+          OPENAI_API_KEY: ${{ secrets.OPENAI_API_KEY }}
+          MV_LLM_BACKEND: ${{ vars.MV_LLM_BACKEND || 'gemma' }}
         run: |
-          ssh pod '
-            set -e
-            # Kill whatever is currently listening on :8080 — finds the
-            # python server regardless of how it was launched.
-            PIDS=$(lsof -ti :8080 2>/dev/null || true)
-            [ -n "$PIDS" ] && kill -9 $PIDS && echo "killed PIDs: $PIDS"
-            sleep 4
+          # Write the remote script to a temp file so we don't have to
+          # play double-quoting games — the runner expands $VARS once,
+          # then we scp the result over and execute it on the pod.
+          REMOTE_SCRIPT=$(mktemp)
+          cat > "$REMOTE_SCRIPT" <<REMOTE_EOF
+          set -e
+          # Kill whatever is currently listening on :8080
+          PIDS=\$(lsof -ti :8080 2>/dev/null || true)
+          [ -n "\$PIDS" ] && kill -9 \$PIDS && echo "killed PIDs: \$PIDS"
+          sleep 4
 
-            cd /workspace
-            > /workspace/server_v5.log
+          cd /workspace
+          > /workspace/server_v5.log
 
-            # Launch fully detached in a new session so it survives
-            # this SSH connection closing.
-            setsid bash -c "cd /workspace && exec env \
-                HF_HOME=/workspace/hf-cache \
-                MV_MODEL=aoi-ot/VibeVoice-Large \
-                MV_ASR_MODEL=microsoft/VibeVoice-ASR \
-                MV_LLM_MODEL=Qwen/Qwen2.5-7B-Instruct \
-                MV_GEMMA4_URL=http://127.0.0.1:8082 \
-                MV_DIFF_STEPS=15 \
-                MV_PORT=8080 \
-                MV_API_KEY=mostashar-dev-key \
-                MV_VOICES_DIR=/workspace/refs/voices \
-                MV_WHISPER_MODEL=openai/whisper-large-v3 \
-                MV_WHISPER_LANGUAGE=ar \
-                python /workspace/server_v5_api.py > /workspace/server_v5.log 2>&1" </dev/null &
-            disown
-            sleep 3
-            NEW_PID=$(lsof -ti :8080 2>/dev/null || echo "")
-            echo "new server PID: ${NEW_PID:-(starting)}"
-          '
+          # Launch fully detached in a new session so it survives the
+          # SSH connection closing. We embed the secrets via the runner's
+          # variable expansion (single \$ above means "expand on pod",
+          # plain \$ here means "expand on runner").
+          setsid bash -c 'cd /workspace && exec env \\
+              HF_HOME=/workspace/hf-cache \\
+              MV_MODEL=aoi-ot/VibeVoice-Large \\
+              MV_ASR_MODEL=microsoft/VibeVoice-ASR \\
+              MV_LLM_MODEL=Qwen/Qwen2.5-7B-Instruct \\
+              MV_GEMMA4_URL=http://127.0.0.1:8082 \\
+              MV_DIFF_STEPS=15 \\
+              MV_PORT=8080 \\
+              MV_API_KEY=mostashar-dev-key \\
+              MV_VOICES_DIR=/workspace/refs/voices \\
+              MV_WHISPER_MODEL=openai/whisper-large-v3 \\
+              MV_WHISPER_LANGUAGE=ar \\
+              MV_LLM_BACKEND=${MV_LLM_BACKEND} \\
+              MV_OPENAI_KEY=${OPENAI_API_KEY} \\
+              python /workspace/server_v5_api.py > /workspace/server_v5.log 2>&1' </dev/null &
+          disown
+          sleep 3
+          NEW_PID=\$(lsof -ti :8080 2>/dev/null || echo "")
+          echo "new server PID: \${NEW_PID:-(starting)}"
+          REMOTE_EOF
+
+          scp "$REMOTE_SCRIPT" pod:/tmp/restart_server.sh
+          ssh pod 'bash /tmp/restart_server.sh && rm /tmp/restart_server.sh'
+          rm "$REMOTE_SCRIPT"
 
       - name: Wait for /v1/health to come up
         run: |
