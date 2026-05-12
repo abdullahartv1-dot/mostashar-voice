@@ -92,6 +92,22 @@ except Exception as _e:  # noqa: BLE001
     run_voice_turn_openai = None  # type: ignore[assignment]
     _OPENAI_BACKEND_AVAILABLE = False
 
+# OpenAI STT (optional). Set MV_STT_BACKEND=openai to send audio to
+# OpenAI's transcription API instead of running local Whisper. The
+# OpenAI STT is more accurate on dialect Arabic at the cost of
+# ~$0.003-0.006 per minute. Falls back to local Whisper silently if
+# the call fails or the key is missing.
+try:
+    try:
+        from voice_openai_stt import openai_transcribe  # type: ignore[no-redef]
+    except ImportError:
+        from .voice_openai_stt import openai_transcribe
+    _OPENAI_STT_AVAILABLE = True
+except Exception as _e:  # noqa: BLE001
+    print(f"[openai-stt] module unavailable: {_e}")
+    openai_transcribe = None  # type: ignore[assignment]
+    _OPENAI_STT_AVAILABLE = False
+
 import numpy as np
 import soundfile as sf
 import librosa
@@ -136,6 +152,15 @@ ASR_ENABLED = os.environ.get("MV_ASR_ENABLED", "1") not in ("0", "false", "False
 # flip back if needed.
 WHISPER_MODEL_NAME = os.environ.get("MV_WHISPER_MODEL", "openai/whisper-large-v3")
 WHISPER_ENABLED = os.environ.get("MV_WHISPER_ENABLED", "1") not in ("0", "false", "False", "")
+# STT backend: "local" (Whisper-large-v3 on GPU, default, free) or
+# "openai" (gpt-4o-mini-transcribe via API, more accurate on dialect
+# Arabic but costs ~$0.003-0.006/min). When openai is selected, the
+# local Whisper is still loaded as a fallback in case the API call
+# fails — never silently break a conversation.
+STT_BACKEND = os.environ.get("MV_STT_BACKEND", "local").lower().strip()
+if STT_BACKEND not in ("local", "openai"):
+    print(f"[stt] unknown MV_STT_BACKEND={STT_BACKEND!r}, defaulting to local")
+    STT_BACKEND = "local"
 # Default transcription language. "ar" forces Arabic decoding which
 # avoids Whisper's auto-detection occasionally guessing Persian/Urdu
 # on dialectal Arabic. Set "auto" to let it decide per call.
@@ -527,6 +552,10 @@ class HealthResponse(BaseModel):
     # "gemma" — local Gemma 4 sidecar with ReAct
     # "openai" — gpt-4o-mini with native function calling
     llm_backend: str = "gemma"
+    # Which STT model transcribes user audio.
+    # "local"  — local Whisper-large-v3 on GPU
+    # "openai" — gpt-4o-mini-transcribe via API (better Arabic dialects)
+    stt_backend: str = "local"
     openai_key_configured: bool = False
     # Sidecars are optional dependencies; their absence degrades but
     # doesn't break the main service (cloning falls back to raw upload,
@@ -1319,6 +1348,52 @@ def _has_arabic_majority(text: str, min_ratio: float = 0.5) -> bool:
     return (arabic / len(letters)) >= min_ratio
 
 
+async def _transcribe_audio(audio_f32_16k: np.ndarray) -> str:
+    """STT dispatcher — routes audio to the configured backend with
+    automatic fallback.
+
+    Backends:
+      • local  → local Whisper-large-v3 on GPU
+      • openai → gpt-4o-mini-transcribe via API (better Arabic)
+
+    If the primary backend fails (network, model error, empty result),
+    automatically fall back to the other backend so the user always
+    gets a chance at a transcription.
+    """
+    primary_backend = STT_BACKEND
+    primary_text = ""
+
+    if primary_backend == "openai" and _OPENAI_STT_AVAILABLE and openai_transcribe is not None:
+        try:
+            primary_text = await openai_transcribe(
+                audio_f32_16k,
+                prompt="هذه محادثة عربية فصحى بلهجة سعودية.",
+            )
+        except RuntimeError as e:
+            # MV_OPENAI_KEY missing — falls through to local
+            print(f"[stt] openai unavailable, using local Whisper: {e}")
+        except Exception as e:  # noqa: BLE001
+            print(f"[stt] openai failed, falling back to local: {e}")
+
+        if primary_text:
+            return primary_text
+        # else fall through to local
+
+    # Local Whisper path (default + fallback)
+    local_text = await _whisper_long_audio(audio_f32_16k)
+    if local_text or primary_backend == "local":
+        return local_text
+
+    # Both failed — but if primary was openai, give it a retry chance:
+    # network blips are common, the user is waiting, one more shot.
+    if primary_backend == "openai" and _OPENAI_STT_AVAILABLE and openai_transcribe is not None:
+        try:
+            return await openai_transcribe(audio_f32_16k)
+        except Exception:
+            pass
+    return ""
+
+
 async def _whisper_long_audio(audio_f32_16k: np.ndarray) -> str:
     """Transcribe arbitrarily-long 16 kHz mono audio via Whisper.
 
@@ -1765,6 +1840,7 @@ async def health():
         llm_loaded=llm_model is not None,
         llm_model=LLM_MODEL_NAME if llm_model is not None else None,
         llm_backend=LLM_BACKEND,
+        stt_backend=STT_BACKEND,
         openai_key_configured=bool(os.environ.get("MV_OPENAI_KEY", "").strip()),
         gemma4=gemma_h,
         openvoice=ov_h,
@@ -2575,6 +2651,82 @@ async def transcribe(
 # ============================================================
 # Live Conversation (Speech-to-Speech)
 # ============================================================
+# ──────────────────────────────────────────────────────────────────────────
+# /v1/realtime/ws — OpenAI Realtime API proxy (separate tab "مكالمات")
+# ──────────────────────────────────────────────────────────────────────────
+try:
+    try:
+        from voice_realtime_proxy import run_realtime_session  # type: ignore[no-redef]
+    except ImportError:
+        from .voice_realtime_proxy import run_realtime_session
+    _REALTIME_AVAILABLE = True
+except Exception as _e:  # noqa: BLE001
+    print(f"[realtime] proxy module unavailable: {_e}")
+    run_realtime_session = None  # type: ignore[assignment]
+    _REALTIME_AVAILABLE = False
+
+
+@app.websocket("/v1/realtime/ws")
+async def realtime_ws(ws: WebSocket):
+    """OpenAI Realtime API proxy.
+
+    Browser ↔ this endpoint ↔ wss://api.openai.com/v1/realtime.
+    We sit in the middle to (a) hide the OpenAI key from the browser
+    and (b) inject the user's Moshaar MCP credentials so tool calls
+    from the model end up running against their workspace.
+
+    Auth: ?api_key=... query param (same as /v1/conversation/ws).
+    MCP:  ?mcp_url=...&mcp_key=... (per-user, optional).
+    """
+    # Validate auth via query param (WS can't carry custom headers).
+    if API_KEY:
+        candidate = ws.query_params.get("api_key", "")
+        if candidate != API_KEY:
+            await ws.close(code=1008)
+            return
+
+    if not _REALTIME_AVAILABLE or run_realtime_session is None:
+        await ws.accept()
+        await ws.send_json({
+            "type": "error",
+            "message": "Realtime proxy module not loaded.",
+        })
+        await ws.close()
+        return
+
+    await ws.accept()
+
+    mcp_url = ws.query_params.get("mcp_url", "")
+    mcp_key = ws.query_params.get("mcp_key", "")
+
+    voice_session = None
+    if _MCP_INTEGRATION_AVAILABLE and mcp_url and mcp_key:
+        try:
+            voice_session = VoiceSession(mcp_url=mcp_url, mcp_key=mcp_key)
+        except Exception as e:
+            print(f"[realtime] failed to create VoiceSession: {e}")
+            voice_session = None
+    if voice_session is None and _MCP_INTEGRATION_AVAILABLE:
+        # Still create one without MCP so the proxy has a place to land
+        # cached state — the tools array just stays empty.
+        voice_session = VoiceSession()
+
+    try:
+        await run_realtime_session(ws, voice_session)
+    except Exception as e:  # noqa: BLE001
+        print(f"[realtime] uncaught: {e}")
+        try:
+            await ws.send_json({"type": "error", "message": str(e)})
+        except Exception:
+            pass
+    finally:
+        if voice_session is not None:
+            try:
+                await voice_session.aclose()
+            except Exception:
+                pass
+
+
 @app.websocket("/v1/conversation/ws")
 async def conversation_ws(ws: WebSocket):
     """Bidirectional voice agent over WebSocket.
@@ -2814,14 +2966,17 @@ async def conversation_ws(ws: WebSocket):
                     f"({n_windows} Whisper window(s)) → voice={voice_id}"
                 )
 
-                # Step 1 — transcribe.
+                # Step 1 — transcribe. Route through OpenAI if configured,
+                # otherwise local Whisper. Either path falls back to the
+                # other on failure so the user gets the best shot at a
+                # successful turn.
                 try:
-                    raw_text = await _whisper_long_audio(audio_f32_16k)
+                    raw_text = await _transcribe_audio(audio_f32_16k)
                 except Exception as e:
-                    print(f"[conversation] Whisper failed: {e}")
+                    print(f"[conversation] STT failed: {e}")
                     await ws.send_json({
                         "type": "error",
-                        "message": "تعذّر تحويل الصوت إلى نص (Whisper).",
+                        "message": "تعذّر تحويل الصوت إلى نص.",
                     })
                     continue
                 user_text = _clean_asr_text_for_display(raw_text)

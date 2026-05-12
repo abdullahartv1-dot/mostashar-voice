@@ -50,6 +50,8 @@ on:
       - 'vibevoice_streaming/voice_agent_tools.py'
       - 'vibevoice_streaming/voice_react_loop.py'
       - 'vibevoice_streaming/voice_openai_loop.py'
+      - 'vibevoice_streaming/voice_openai_stt.py'
+      - 'vibevoice_streaming/voice_realtime_proxy.py'
       - 'vibevoice_streaming/voice_session.py'
       - '.github/workflows/deploy-pod.yml'
   # Manual run from the Actions tab — useful when you want to redeploy
