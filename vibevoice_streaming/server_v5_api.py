@@ -2913,8 +2913,15 @@ async def _gemma4_text_chat(
                 "role": "user",
                 "content": f'<tool_result name="{t.get("name", "")}">{t.get("content", "")}</tool_result>',
             })
+    # When the ReAct loop iterates (after a tool call), `user_text` is
+    # empty — we just want Gemma to read the latest tool_result from
+    # history and respond.  But the Gemma sidecar's Form validation
+    # rejects an empty `text` field with 422.  Send a single space as
+    # a no-op continuation marker; the chat template treats it as a
+    # benign "go ahead" cue rather than meaningful input.
+    safe_text = user_text if user_text else " "
     data = {
-        "text": user_text,
+        "text": safe_text,
         "history": json.dumps(dialog, ensure_ascii=False),
         "max_tokens": str(max_tokens),
     }
