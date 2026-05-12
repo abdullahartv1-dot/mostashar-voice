@@ -33,6 +33,7 @@
 # minutes — cheap.
 
 name: Deploy to RunPod
+# Last manual trigger: 2026-05-12 — after POD_HOST/POD_PORT rotation.
 
 on:
   push:
