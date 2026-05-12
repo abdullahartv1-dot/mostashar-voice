@@ -309,75 +309,76 @@ async def _pump_openai_to_user(
                 if et == "error":
                     print(f"[realtime] error detail: {ev.get('error')}", flush=True)
 
-        if et == "response.audio.delta":
-            # base64 pcm16 audio chunk — decode and binary-stream to user.
-            audio_b64 = ev.get("delta", "")
-            try:
-                audio_bytes = base64.b64decode(audio_b64)
-                await client_ws.send_bytes(audio_bytes)
-                # Counter: log every 50 chunks so we can confirm audio is
-                # actually being forwarded. If the user reports "no
-                # response", check this number in /workspace/server_v5.log.
-                # Use function-local counter to avoid sharing state
-                # across sessions. Log the first chunk + every 25 after.
-                _audio_chunks_sent[0] += 1
-                if _audio_chunks_sent[0] == 1 or _audio_chunks_sent[0] % 25 == 0:
-                    print(f"[realtime] forwarded audio chunk #{_audio_chunks_sent[0]} "
-                          f"({len(audio_bytes)} bytes)", flush=True)
-            except Exception as e:  # noqa: BLE001
-                print(f"[realtime] send_bytes failed: {e}", flush=True)
-                import traceback; traceback.print_exc()
+            # ⚠️ EVERYTHING BELOW MUST live at 12-space indent so it's
+            # inside `async for raw in openai_ws`. A previous edit left
+            # this block at 8-space indent, which made it run ONCE after
+            # the loop exited (using whatever `et` happened to hold last)
+            # — that's why audio.delta events stopped reaching the user
+            # in the calls tab.
+            if et == "response.audio.delta":
+                audio_b64 = ev.get("delta", "")
+                try:
+                    audio_bytes = base64.b64decode(audio_b64)
+                    await client_ws.send_bytes(audio_bytes)
+                    _audio_chunks_sent[0] += 1
+                    if _audio_chunks_sent[0] == 1 or _audio_chunks_sent[0] % 25 == 0:
+                        print(
+                            f"[realtime] forwarded audio chunk #{_audio_chunks_sent[0]} "
+                            f"({len(audio_bytes)} bytes)", flush=True,
+                        )
+                except Exception as e:  # noqa: BLE001
+                    print(f"[realtime] send_bytes failed: {e}", flush=True)
+                    import traceback; traceback.print_exc()
 
-        elif et == "response.audio_transcript.delta":
-            await client_ws.send_json({
-                "type": "assistant_text_delta", "text": ev.get("delta", ""),
-            })
+            elif et == "response.audio_transcript.delta":
+                await client_ws.send_json({
+                    "type": "assistant_text_delta", "text": ev.get("delta", ""),
+                })
 
-        elif et == "response.audio_transcript.done":
-            await client_ws.send_json({
-                "type": "assistant_text_done",
-                "text": ev.get("transcript", ""),
-            })
+            elif et == "response.audio_transcript.done":
+                await client_ws.send_json({
+                    "type": "assistant_text_done",
+                    "text": ev.get("transcript", ""),
+                })
 
-        elif et == "conversation.item.input_audio_transcription.completed":
-            # User's audio transcribed by OpenAI — show them what was heard.
-            await client_ws.send_json({
-                "type": "user_transcript",
-                "text": ev.get("transcript", ""),
-            })
+            elif et == "conversation.item.input_audio_transcription.completed":
+                await client_ws.send_json({
+                    "type": "user_transcript",
+                    "text": ev.get("transcript", ""),
+                })
 
-        elif et == "response.function_call_arguments.delta":
-            cid = ev.get("call_id", "")
-            pending_args[cid] = pending_args.get(cid, "") + ev.get("delta", "")
+            elif et == "response.function_call_arguments.delta":
+                cid = ev.get("call_id", "")
+                pending_args[cid] = pending_args.get(cid, "") + ev.get("delta", "")
 
-        elif et == "response.function_call_arguments.done":
-            cid = ev.get("call_id", "")
-            name = ev.get("name", "")
-            args_json = ev.get("arguments") or pending_args.pop(cid, "{}") or "{}"
-            try:
-                args = json.loads(args_json)
-            except Exception:
-                args = {}
-            await _handle_tool_call(
-                openai_ws, client_ws, session, cid, name, args,
-            )
+            elif et == "response.function_call_arguments.done":
+                cid = ev.get("call_id", "")
+                name = ev.get("name", "")
+                args_json = ev.get("arguments") or pending_args.pop(cid, "{}") or "{}"
+                try:
+                    args = json.loads(args_json)
+                except Exception:
+                    args = {}
+                await _handle_tool_call(
+                    openai_ws, client_ws, session, cid, name, args,
+                )
 
-        elif et == "input_audio_buffer.speech_started":
-            await client_ws.send_json({"type": "vad_speech_started"})
+            elif et == "input_audio_buffer.speech_started":
+                await client_ws.send_json({"type": "vad_speech_started"})
 
-        elif et == "input_audio_buffer.speech_stopped":
-            await client_ws.send_json({"type": "vad_speech_stopped"})
+            elif et == "input_audio_buffer.speech_stopped":
+                await client_ws.send_json({"type": "vad_speech_stopped"})
 
-        elif et == "response.done":
-            await client_ws.send_json({"type": "response_done"})
+            elif et == "response.done":
+                await client_ws.send_json({"type": "response_done"})
 
-        elif et == "error":
-            err = ev.get("error", {})
-            print(f"[realtime] openai error: {err}", flush=True)
-            await client_ws.send_json({
-                "type": "error",
-                "message": err.get("message", "openai error"),
-            })
+            elif et == "error":
+                err = ev.get("error", {})
+                print(f"[realtime] openai error: {err}", flush=True)
+                await client_ws.send_json({
+                    "type": "error",
+                    "message": err.get("message", "openai error"),
+                })
     except Exception as e:  # noqa: BLE001
         print(f"[realtime] openai pump exited: {type(e).__name__}: {e}", flush=True)
         import traceback; traceback.print_exc()

@@ -840,6 +840,38 @@ _ARABIC_NORMALIZE_RULES = [
 ]
 
 
+def _strip_markdown(text: str) -> str:
+    """Remove markdown emphasis + list markers that OpenAI sometimes adds
+    so they don't get pronounced as 'asterisk asterisk' or 'one period'.
+
+    Targets the patterns the LLM actually emits in Arabic responses:
+      **bold** / *italic*  → bare text (the model rarely re-emphasizes)
+      `code`               → bare text
+      ~~strike~~           → bare text
+      1. / 2.  list items  → bare text (we keep the digit but drop the period)
+      - / *    bullets     → bare text
+      [text](url)          → just the link text
+      ###  headings        → drop the hashes
+    """
+    # Code spans
+    text = re.sub(r"`+([^`]+)`+", r"\1", text)
+    # Bold + italic — handle ** before * so the order matters
+    text = re.sub(r"\*\*([^*]+)\*\*", r"\1", text)
+    text = re.sub(r"\*([^*]+)\*", r"\1", text)
+    # Strikethrough
+    text = re.sub(r"~~([^~]+)~~", r"\1", text)
+    # Markdown links [text](url) → text
+    text = re.sub(r"\[([^\]]+)\]\(([^)]+)\)", r"\1", text)
+    # Heading hashes at line start
+    text = re.sub(r"(?m)^#+\s*", "", text)
+    # Numbered list "1. " → "1: " so the period isn't a sentence boundary
+    # for VibeVoice (it would otherwise generate a misleading pause)
+    text = re.sub(r"(?m)^\s*(\d+)\.\s+", r"\1: ", text)
+    # Bullet list "- " or "* " at line start → keep newline, drop bullet
+    text = re.sub(r"(?m)^\s*[-*]\s+", "", text)
+    return text
+
+
 def _normalize_arabic_for_tts(text: str) -> str:
     """Apply the orthography + punctuation rules VibeVoice needs.
 
@@ -854,8 +886,11 @@ def _normalize_arabic_for_tts(text: str) -> str:
     the model from drifting into Persian-sounding gibberish on long
     paragraphs. User reported "النص الطويل ينطقه بلغة غير مفهومة" —
     this is the fix.
+
+    Also strips markdown (** for bold, list markers, etc.) which the LLM
+    sometimes emits and VibeVoice would otherwise pronounce literally.
     """
-    out = text
+    out = _strip_markdown(text)
     for old, new in _ARABIC_NORMALIZE_RULES:
         out = out.replace(old, new)
     # Guarantee a terminal sentence boundary.
@@ -3379,25 +3414,41 @@ async def _conversation_turn_with_response(
     first_emitted = False
     ttfa_ms = 0.0
     chunks = 0
+    client_gone = False
     assert _tts_lock is not None
     async with _serialize(_tts_lock, _tts_stats):
         async for pcm in _generate_stream(response_text, voice_id, None):
-            if interrupt_flag["value"]:
+            if interrupt_flag["value"] or client_gone:
                 break
             if not first_emitted:
                 ttfa_ms = (time.time() - turn_start) * 1000
                 first_emitted = True
-            await ws.send_bytes(pcm)
-            chunks += 1
+            # Wrap send_bytes so a client disconnect mid-stream doesn't
+            # bubble up as an unhandled exception (which FastAPI then
+            # surfaces to the still-open WS as code 1011). When the
+            # send fails, mark the client gone and let the loop unwind
+            # cleanly so the TTS lock is released.
+            try:
+                await ws.send_bytes(pcm)
+                chunks += 1
+            except Exception as e:  # noqa: BLE001
+                print(f"[conversation] client gone mid-TTS: {type(e).__name__}: {e}",
+                      flush=True)
+                client_gone = True
+                break
 
     total_ms = (time.time() - turn_start) * 1000
-    await ws.send_json({
-        "type": "turn_done",
-        "ttfa_ms": round(ttfa_ms),
-        "total_ms": round(total_ms),
-        "chunks": chunks,
-        "engine": "gemma4",
-    })
+    if not client_gone:
+        try:
+            await ws.send_json({
+                "type": "turn_done",
+                "ttfa_ms": round(ttfa_ms),
+                "total_ms": round(total_ms),
+                "chunks": chunks,
+                "engine": "gemma4",
+            })
+        except Exception:
+            pass  # client may have just disconnected; nothing to do
 
 
 async def _conversation_turn(
