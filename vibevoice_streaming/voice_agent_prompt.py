@@ -13,8 +13,12 @@ from __future__ import annotations
 import json
 from typing import Any, Dict, List, Optional
 
-from .voice_agent_helpers import now_iso, today_iso
-from .voice_agent_tools import VOICE_TOOLS, VoiceTool
+try:
+    from voice_agent_helpers import now_iso, today_iso  # type: ignore[no-redef]
+    from voice_agent_tools import VOICE_TOOLS, VoiceTool  # type: ignore[no-redef]
+except ImportError:
+    from .voice_agent_helpers import now_iso, today_iso
+    from .voice_agent_tools import VOICE_TOOLS, VoiceTool
 
 
 # ──────────────────────────────────────────────────────────────────────────

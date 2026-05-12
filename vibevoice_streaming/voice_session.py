@@ -20,9 +20,17 @@ import asyncio
 from collections import deque
 from typing import Any, Deque, Dict, List, Optional
 
-from .moshaar_mcp import MoshaarMCPClient, MoshaarToolSpec
-from .voice_agent_helpers import to_lexical_json, to_block_editor_html
-from .voice_agent_tools import VOICE_TOOLS
+# Allow this module to be imported both as part of a package (when
+# the WS server is launched via `python -m vibevoice_streaming.server_v5_api`)
+# and standalone (when launched as a plain script — the deploy pattern).
+try:
+    from moshaar_mcp import MoshaarMCPClient, MoshaarToolSpec  # type: ignore[no-redef]
+    from voice_agent_helpers import to_lexical_json, to_block_editor_html  # type: ignore[no-redef]
+    from voice_agent_tools import VOICE_TOOLS  # type: ignore[no-redef]
+except ImportError:
+    from .moshaar_mcp import MoshaarMCPClient, MoshaarToolSpec
+    from .voice_agent_helpers import to_lexical_json, to_block_editor_html
+    from .voice_agent_tools import VOICE_TOOLS
 
 
 MAX_HISTORY = 16  # keep last 8 user/assistant turns

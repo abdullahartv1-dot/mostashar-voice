@@ -20,19 +20,34 @@ import json
 import logging
 from typing import Any, Awaitable, Callable, Dict, List, Optional, Tuple
 
-from .voice_agent_helpers import to_block_editor_html, to_lexical_json
-from .voice_agent_prompt import (
-    build_system_prompt,
-    classify_confirmation,
-    parse_tool_call,
-    strip_tool_call,
-)
-from .voice_agent_tools import (
-    DROPDOWN_TOOLS,
-    TOOLS_BY_NAME,
-    needs_confirmation,
-)
-from .voice_session import VoiceSession
+try:
+    from voice_agent_helpers import to_block_editor_html, to_lexical_json  # type: ignore[no-redef]
+    from voice_agent_prompt import (  # type: ignore[no-redef]
+        build_system_prompt,
+        classify_confirmation,
+        parse_tool_call,
+        strip_tool_call,
+    )
+    from voice_agent_tools import (  # type: ignore[no-redef]
+        DROPDOWN_TOOLS,
+        TOOLS_BY_NAME,
+        needs_confirmation,
+    )
+    from voice_session import VoiceSession  # type: ignore[no-redef]
+except ImportError:
+    from .voice_agent_helpers import to_block_editor_html, to_lexical_json
+    from .voice_agent_prompt import (
+        build_system_prompt,
+        classify_confirmation,
+        parse_tool_call,
+        strip_tool_call,
+    )
+    from .voice_agent_tools import (
+        DROPDOWN_TOOLS,
+        TOOLS_BY_NAME,
+        needs_confirmation,
+    )
+    from .voice_session import VoiceSession
 
 
 log = logging.getLogger("voice_react_loop")

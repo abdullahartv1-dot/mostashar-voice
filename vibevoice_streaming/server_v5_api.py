@@ -58,9 +58,18 @@ from typing import Optional, AsyncGenerator
 # Voice-agent MCP integration — added 2026-05-12.
 # Imports kept lazy-friendly: these modules are pure-Python, no extra
 # dependencies, and import order is independent of model loading.
+#
+# Note: try the absolute import first (works when server_v5_api.py is
+# launched directly via `python server_v5_api.py`, which is how the
+# pod's start_server.sh runs it), and fall back to the package-relative
+# import (works when imported as `vibevoice_streaming.server_v5_api`).
 try:
-    from .voice_session import VoiceSession
-    from .voice_react_loop import run_voice_turn
+    try:
+        from voice_session import VoiceSession  # type: ignore[no-redef]
+        from voice_react_loop import run_voice_turn  # type: ignore[no-redef]
+    except ImportError:
+        from .voice_session import VoiceSession
+        from .voice_react_loop import run_voice_turn
     _MCP_INTEGRATION_AVAILABLE = True
 except Exception as _e:  # noqa: BLE001
     print(f"[mcp] voice-agent MCP integration unavailable: {_e}")
