@@ -57,11 +57,13 @@ try:
     from voice_openai_loop import _FIELD_TYPES  # reuse the schema map
     from voice_react_loop import _execute_tool, _summarize_result  # reuse MCP exec
     from voice_session import VoiceSession  # type: ignore[no-redef]
+    from voice_elevenlabs_tts import elevenlabs_stream  # type: ignore[no-redef]
 except ImportError:
     from .voice_agent_tools import VOICE_TOOLS, TOOLS_BY_NAME, needs_confirmation
     from .voice_openai_loop import _FIELD_TYPES
     from .voice_react_loop import _execute_tool, _summarize_result
     from .voice_session import VoiceSession
+    from .voice_elevenlabs_tts import elevenlabs_stream
 
 
 log = logging.getLogger("voice_realtime_proxy")
@@ -72,6 +74,23 @@ REALTIME_URL = os.environ.get(
 )
 # OpenAI voice options: alloy / ash / ballad / coral / echo / sage / shimmer / verse
 REALTIME_VOICE = os.environ.get("MV_OPENAI_REALTIME_VOICE", "shimmer")
+
+# TTS backend for the calls tab. "openai" uses OpenAI Realtime's native
+# audio output (voice from MV_OPENAI_REALTIME_VOICE). "elevenlabs" tells
+# the realtime session to produce text only and pipes that text through
+# ElevenLabs streaming TTS — cleaner Arabic prosody, slightly higher
+# TTFA (~+500 ms because we wait for sentence boundaries before TTS).
+REALTIME_TTS_BACKEND = os.environ.get(
+    "MV_REALTIME_TTS_BACKEND", "openai"
+).lower().strip()
+if REALTIME_TTS_BACKEND not in ("openai", "elevenlabs"):
+    REALTIME_TTS_BACKEND = "openai"
+
+
+# Detect sentence boundaries so we can send chunks to ElevenLabs early
+# instead of waiting for the full response. Latin + Arabic terminators.
+import re as _re
+_SENTENCE_BOUNDARY = _re.compile(r"[.!?؟।]+\s+|[.!?؟।]+$")
 
 
 SYSTEM_INSTRUCTIONS_AR = """\
@@ -202,37 +221,42 @@ async def _configure_session(openai_ws, session: VoiceSession) -> None:
 
     tools = _build_realtime_tools() if (session.mcp_connected and session._initialized) else []
 
-    # Realtime API session.update — only Whisper-1 is valid for the
-    # nested input_audio_transcription model (the newer
-    # gpt-4o-mini-transcribe is for the top-level /audio/transcriptions
-    # endpoint, not embedded inside Realtime). Using the wrong model
-    # makes OpenAI close the WS with an error.
-    update_msg = {
-        "type": "session.update",
-        "session": {
-            "modalities": ["text", "audio"],
-            "voice": REALTIME_VOICE,
-            "instructions": SYSTEM_INSTRUCTIONS_AR,
-            "input_audio_format": "pcm16",
-            "output_audio_format": "pcm16",
-            "input_audio_transcription": {
-                "model": "whisper-1",
-            },
-            "turn_detection": {
-                "type": "server_vad",
-                "threshold": 0.5,
-                "prefix_padding_ms": 300,
-                "silence_duration_ms": 700,
-                "create_response": True,
-            },
-            "tools": tools,
-            "tool_choice": "auto",
-            "temperature": 0.8,
+    # When ElevenLabs handles TTS, ask OpenAI for text only. We still
+    # use the same Realtime model + tool calling + server VAD, just
+    # without the (now wasted) audio synthesis on OpenAI's side.
+    modalities = ["text"] if REALTIME_TTS_BACKEND == "elevenlabs" else ["text", "audio"]
+
+    session_obj: Dict[str, Any] = {
+        "modalities": modalities,
+        "instructions": SYSTEM_INSTRUCTIONS_AR,
+        "input_audio_format": "pcm16",
+        "input_audio_transcription": {
+            "model": "whisper-1",
         },
+        "turn_detection": {
+            "type": "server_vad",
+            "threshold": 0.5,
+            "prefix_padding_ms": 300,
+            "silence_duration_ms": 700,
+            "create_response": True,
+        },
+        "tools": tools,
+        "tool_choice": "auto",
+        "temperature": 0.8,
     }
+    # Only set voice + output format when OpenAI is producing audio.
+    if REALTIME_TTS_BACKEND == "openai":
+        session_obj["voice"] = REALTIME_VOICE
+        session_obj["output_audio_format"] = "pcm16"
+
+    update_msg = {"type": "session.update", "session": session_obj}
     await openai_ws.send(json.dumps(update_msg))
-    print(f"[realtime] session.update sent (tools={len(tools)}, voice={REALTIME_VOICE})",
-          flush=True)
+    print(
+        f"[realtime] session.update sent (tools={len(tools)}, "
+        f"tts={REALTIME_TTS_BACKEND}, "
+        f"voice={REALTIME_VOICE if REALTIME_TTS_BACKEND == 'openai' else 'elevenlabs'})",
+        flush=True,
+    )
 
 
 async def _pump_user_to_openai(client_ws, openai_ws) -> None:
@@ -287,6 +311,30 @@ async def _pump_user_to_openai(client_ws, openai_ws) -> None:
                 await openai_ws.send(json.dumps({"type": "response.create"}))
 
 
+async def _stream_elevenlabs_to_client(
+    client_ws, text: str, audio_count: List[int],
+) -> None:
+    """Stream a chunk of text through ElevenLabs and forward PCM bytes
+    to the user's WS. Used when REALTIME_TTS_BACKEND=elevenlabs."""
+    if not text.strip():
+        return
+    try:
+        async for chunk in elevenlabs_stream(text):
+            try:
+                await client_ws.send_bytes(chunk)
+                audio_count[0] += 1
+                if audio_count[0] == 1 or audio_count[0] % 25 == 0:
+                    print(
+                        f"[realtime/elevenlabs] forwarded audio chunk "
+                        f"#{audio_count[0]} ({len(chunk)} bytes)", flush=True,
+                    )
+            except Exception as e:  # noqa: BLE001
+                print(f"[realtime/elevenlabs] send_bytes failed: {e}", flush=True)
+                break
+    except Exception as e:  # noqa: BLE001
+        print(f"[realtime/elevenlabs] stream error: {e}", flush=True)
+
+
 async def _pump_openai_to_user(
     client_ws, openai_ws, session: VoiceSession,
 ) -> None:
@@ -296,6 +344,10 @@ async def _pump_openai_to_user(
     # mutable counter; using a list so the closure-like access in the
     # handler doesn't accidentally rebind a local var
     _audio_chunks_sent = [0]
+    # When REALTIME_TTS_BACKEND=elevenlabs, accumulate OpenAI's text
+    # deltas and flush each completed sentence into ElevenLabs streaming
+    # TTS so the user hears the response with low latency.
+    elevenlabs_buffer: List[str] = [""]
 
     try:
         async for raw in openai_ws:
@@ -340,6 +392,7 @@ async def _pump_openai_to_user(
                     import traceback; traceback.print_exc()
 
             elif et == "response.audio_transcript.delta":
+                # OpenAI audio path — text accompanies the generated audio.
                 await client_ws.send_json({
                     "type": "assistant_text_delta", "text": ev.get("delta", ""),
                 })
@@ -348,6 +401,52 @@ async def _pump_openai_to_user(
                 await client_ws.send_json({
                     "type": "assistant_text_done",
                     "text": ev.get("transcript", ""),
+                })
+
+            elif et == "response.text.delta":
+                # Pure-text modality (REALTIME_TTS_BACKEND=elevenlabs).
+                # Forward the delta to the user's transcript bubble AND
+                # accumulate it in the ElevenLabs buffer. When we cross
+                # a sentence boundary, flush the completed sentence(s)
+                # to ElevenLabs so playback starts before the full
+                # response is even done generating.
+                delta = ev.get("delta", "")
+                if delta:
+                    await client_ws.send_json({
+                        "type": "assistant_text_delta", "text": delta,
+                    })
+                    elevenlabs_buffer[0] += delta
+                    # Cut at the last sentence boundary; keep the tail
+                    # in the buffer for the next iteration.
+                    buf = elevenlabs_buffer[0]
+                    last_end = -1
+                    for m in _SENTENCE_BOUNDARY.finditer(buf):
+                        last_end = m.end()
+                    if last_end > 0:
+                        to_speak = buf[:last_end].strip()
+                        elevenlabs_buffer[0] = buf[last_end:]
+                        if to_speak:
+                            # Fire and don't await — TTS runs concurrently
+                            # with the next OpenAI events.
+                            asyncio.create_task(
+                                _stream_elevenlabs_to_client(
+                                    client_ws, to_speak, _audio_chunks_sent,
+                                )
+                            )
+
+            elif et == "response.text.done":
+                # Flush any remaining text in the buffer through ElevenLabs.
+                tail = elevenlabs_buffer[0].strip()
+                elevenlabs_buffer[0] = ""
+                if tail:
+                    asyncio.create_task(
+                        _stream_elevenlabs_to_client(
+                            client_ws, tail, _audio_chunks_sent,
+                        )
+                    )
+                await client_ws.send_json({
+                    "type": "assistant_text_done",
+                    "text": ev.get("text", ""),
                 })
 
             elif et == "conversation.item.input_audio_transcription.completed":
