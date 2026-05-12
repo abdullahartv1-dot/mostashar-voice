@@ -55,6 +55,19 @@ from contextlib import asynccontextmanager
 from pathlib import Path
 from typing import Optional, AsyncGenerator
 
+# Voice-agent MCP integration — added 2026-05-12.
+# Imports kept lazy-friendly: these modules are pure-Python, no extra
+# dependencies, and import order is independent of model loading.
+try:
+    from .voice_session import VoiceSession
+    from .voice_react_loop import run_voice_turn
+    _MCP_INTEGRATION_AVAILABLE = True
+except Exception as _e:  # noqa: BLE001
+    print(f"[mcp] voice-agent MCP integration unavailable: {_e}")
+    VoiceSession = None  # type: ignore[assignment]
+    run_voice_turn = None  # type: ignore[assignment]
+    _MCP_INTEGRATION_AVAILABLE = False
+
 import numpy as np
 import soundfile as sf
 import librosa
@@ -2518,6 +2531,22 @@ async def conversation_ws(ws: WebSocket):
     voice_id = ws.query_params.get("voice_id", "default")
     language = ws.query_params.get("language", "ar")
 
+    # Per-user Moshaar MCP credentials (query-param-based — WS API doesn't
+    # support custom headers from the browser). When both are present we
+    # spin up a VoiceSession with MCP support and route turns through the
+    # ReAct loop; otherwise we keep the legacy chat-only behavior.
+    mcp_url = (ws.query_params.get("mcp_url") or "").strip()
+    mcp_key = (ws.query_params.get("mcp_key") or "").strip()
+    voice_session: Optional["VoiceSession"] = None
+    if _MCP_INTEGRATION_AVAILABLE and mcp_url and mcp_key:
+        try:
+            voice_session = VoiceSession(mcp_url=mcp_url, mcp_key=mcp_key)
+            print(f"[conversation] MCP enabled for this session "
+                  f"(url={mcp_url}, key=***{mcp_key[-4:]})")
+        except Exception as e:
+            print(f"[conversation] failed to create VoiceSession: {e}")
+            voice_session = None
+
     # Sanity check: the voice the client asked for must exist on disk,
     # otherwise we'd silently fall through to the gold-reference
     # `default.wav` (a male voice) — that's exactly the bug that made
@@ -2601,7 +2630,9 @@ async def conversation_ws(ws: WebSocket):
                     })
                     continue
                 try:
-                    gemma_resp = await _gemma4_text_chat(user_text, history)
+                    gemma_resp = await _voice_chat_or_react(
+                        user_text, history, voice_session, ws=ws,
+                    )
                 except Exception as e:
                     print(f"[conversation] text-mode Gemma failed: {e}")
                     await ws.send_json({
@@ -2715,9 +2746,12 @@ async def conversation_ws(ws: WebSocket):
                     "audio_url": audio_url,
                 })
 
-                # Step 2 — generate response via Gemma 4 text-chat.
+                # Step 2 — generate response via Gemma 4 text-chat OR
+                # ReAct loop if MCP is configured on this WS session.
                 try:
-                    gemma_resp = await _gemma4_text_chat(user_text, history)
+                    gemma_resp = await _voice_chat_or_react(
+                        user_text, history, voice_session, ws=ws,
+                    )
                 except Exception as e:
                     print(f"[conversation] Gemma text-chat failed: {e}")
                     await ws.send_json({
@@ -2754,6 +2788,14 @@ async def conversation_ws(ws: WebSocket):
             await ws.send_json({"type": "error", "message": str(e)[:500]})
         except Exception:
             pass
+    finally:
+        # Drop the per-WS Moshaar MCP credentials + close the httpx
+        # client. The MCP key never lives past the call.
+        if voice_session is not None:
+            try:
+                await voice_session.aclose()
+            except Exception:
+                pass
 
 
 async def _gemma4_audio_chat(audio_f32_16k: np.ndarray, history: list[dict]) -> str:
@@ -2777,22 +2819,93 @@ async def _gemma4_audio_chat(audio_f32_16k: np.ndarray, history: list[dict]) -> 
     return (j.get("text") or "").strip()
 
 
-async def _gemma4_text_chat(user_text: str, history: list[dict]) -> str:
+async def _voice_chat_or_react(
+    user_text: str,
+    history: list[dict],
+    voice_session,
+    ws=None,
+) -> str:
+    """Route a voice turn through either the plain Gemma chat or the
+    MCP-aware ReAct loop, depending on whether the session has MCP
+    credentials configured.
+
+    Returns the final Arabic text to send to TTS. Side effect: when
+    MCP is active, pushes user/assistant turns into `voice_session`'s
+    own history. We keep the legacy `history` list in sync so the rest
+    of the WS handler (session logging, transcript bubbles) works
+    unchanged.
+
+    Also emits tool/confirmation events on `ws` if provided.
+    """
+    if (voice_session is not None
+            and voice_session.mcp_connected
+            and run_voice_turn is not None):
+        async def _gemma(sp, h, ut, mt):
+            return await _gemma4_text_chat(ut, h, system_prompt=sp, max_tokens=mt)
+        result = await run_voice_turn(
+            user_text=user_text,
+            session=voice_session,
+            gemma_call=_gemma,
+        )
+        if ws is not None:
+            for ev in result.tool_events:
+                try:
+                    await ws.send_json({"type": ev.get("type", "tool_event"), **ev})
+                except Exception:
+                    pass
+        return result.text
+
+    # Fallback: legacy single-shot chat (no MCP)
+    return await _gemma4_text_chat(user_text, history)
+
+
+async def _gemma4_text_chat(
+    user_text: str,
+    history: list[dict],
+    *,
+    system_prompt: Optional[str] = None,
+    max_tokens: int = 160,
+) -> str:
     """Text-only chat turn against the Gemma 4 sidecar. Used by the
     long-audio conversation path: Whisper transcribes the audio →
     we hand the text + dialog history to Gemma 4 → Gemma generates
     the response. Same model as the short-audio path so the user
     gets consistent quality regardless of clip length.
+
+    `system_prompt` lets callers override the default chat persona —
+    used by the MCP voice-agent loop to inject the tool catalog.
+    `max_tokens` is bumped for the tool-use path because a tool call
+    plus the surrounding text easily exceeds the default 160 token
+    budget meant for short voice replies.
     """
     if not GEMMA4_URL:
         return ""
     import httpx
-    dialog = [t for t in history if t.get("role") in ("user", "assistant")]
+    # Keep user/assistant turns AND tool results — Gemma sees the tool
+    # outputs as additional context. We tag tool turns as 'user' for the
+    # Gemma chat template (it only understands user/assistant), but the
+    # voice agent prompt explains the convention.
+    dialog: list[dict] = []
+    for t in history:
+        role = t.get("role")
+        if role in ("user", "assistant"):
+            dialog.append(t)
+        elif role == "tool":
+            # Surface the tool result as a synthetic user message so the
+            # model can incorporate it. The agent prompt teaches it to
+            # treat `<tool_result name="...">...</tool_result>` lines
+            # as system feedback rather than user speech.
+            dialog.append({
+                "role": "user",
+                "content": f'<tool_result name="{t.get("name", "")}">{t.get("content", "")}</tool_result>',
+            })
     data = {
         "text": user_text,
         "history": json.dumps(dialog, ensure_ascii=False),
-        "max_tokens": "160",
+        "max_tokens": str(max_tokens),
     }
+    if system_prompt:
+        data["system"] = system_prompt
     async with httpx.AsyncClient(timeout=30.0) as client:
         r = await client.post(f"{GEMMA4_URL}/v1/text-chat", data=data)
     r.raise_for_status()
