@@ -152,13 +152,20 @@ GEMMA4_URL = os.environ.get("MV_GEMMA4_URL", "http://127.0.0.1:8082")
 #   "gemma"  — local Gemma 4 sidecar with hand-rolled ReAct <tool> tags
 #   "openai" — OpenAI gpt-4o-mini with native function calling
 # Both share the same MCP integration (voice_react_loop._execute_tool +
-# _summarize_result), only the LLM piece differs. OpenAI tends to be
-# more reliable on Arabic + tool calling but costs ~$0.15/M input tokens.
-# Gemma is free but slightly less consistent. Set on the pod via env.
-LLM_BACKEND = os.environ.get("MV_LLM_BACKEND", "gemma").lower().strip()
-if LLM_BACKEND not in ("gemma", "openai"):
-    print(f"[backend] unknown MV_LLM_BACKEND={LLM_BACKEND!r}, defaulting to gemma")
-    LLM_BACKEND = "gemma"
+# _summarize_result), only the LLM piece differs. OpenAI is more
+# reliable on Arabic + tool calling but costs ~$0.15/M input tokens.
+#
+# Default = openai when MV_OPENAI_KEY is configured (better quality
+# and ~10× more reliable tool calls). Falls back to gemma when no key.
+# Operator can force either explicitly via MV_LLM_BACKEND env.
+_explicit_backend = os.environ.get("MV_LLM_BACKEND", "").lower().strip()
+_openai_key_present = bool(os.environ.get("MV_OPENAI_KEY", "").strip())
+if _explicit_backend in ("gemma", "openai"):
+    LLM_BACKEND = _explicit_backend
+elif _openai_key_present:
+    LLM_BACKEND = "openai"   # auto-select OpenAI when key is configured
+else:
+    LLM_BACKEND = "gemma"    # fallback when no key
 # OpenVoice v2 sidecar — applies a clarity-of-articulation donor's
 # acoustic characteristics to an uploaded reference at clone time. Set
 # MV_OPENVOICE_URL="" to disable (clone uses the raw upload as-is).
@@ -2688,13 +2695,17 @@ async def conversation_ws(ws: WebSocket):
             elif mtype == "interrupt":
                 interrupt_flag["value"] = True
             elif mtype == "text":
-                # Text-only turn — bypass audio entirely. We use Gemma 4
-                # (text-chat) for the response so the conversation flow
-                # is consistent with the audio path. No Qwen fallback
-                # per design decision.
+                # Text-only turn — user typed in the chat input. We
+                # generate the response via Gemma/OpenAI but DO NOT run
+                # TTS (the user is reading, not listening). If the
+                # client wants TTS anyway, they can pass speak=true in
+                # the message payload — the voice-note and live-call
+                # paths use a different message type ("end_of_utterance")
+                # which always runs TTS.
                 user_text = (data.get("content") or "").strip()
                 if not user_text:
                     continue
+                want_tts = bool(data.get("speak", False))
                 interrupt_flag["value"] = False
                 if not GEMMA4_URL:
                     await ws.send_json({
@@ -2721,10 +2732,24 @@ async def conversation_ws(ws: WebSocket):
                     continue
                 history.append({"role": "user", "content": user_text})
                 history.append({"role": "assistant", "content": gemma_resp})
-                await _conversation_turn_with_response(
-                    ws, voice_id, language, user_text, gemma_resp,
-                    history, interrupt_flag,
-                )
+                if want_tts:
+                    await _conversation_turn_with_response(
+                        ws, voice_id, language, user_text, gemma_resp,
+                        history, interrupt_flag,
+                    )
+                else:
+                    # Text-only response. Emit the response text + a
+                    # text-only turn_done so the frontend knows we're
+                    # done without waiting for audio chunks.
+                    t0 = time.time()
+                    await ws.send_json({
+                        "type": "response_text", "text": gemma_resp,
+                    })
+                    await ws.send_json({
+                        "type": "turn_done",
+                        "ttfa_ms": 0, "total_ms": int((time.time() - t0) * 1000),
+                        "chunks": 0, "engine": "text-only",
+                    })
             elif mtype == "end_of_utterance":
                 if not audio_buffer:
                     continue

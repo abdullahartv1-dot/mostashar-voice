@@ -19,6 +19,16 @@
 
 set -euo pipefail
 
+# Source persistent env file if present — lets the operator set
+# MV_OPENAI_KEY / MV_LLM_BACKEND once and have them survive every
+# subsequent restart, without needing to re-export each time.
+# See /workspace/.env.example for the template.
+if [ -f /workspace/.env ]; then
+    set -a
+    . /workspace/.env
+    set +a
+fi
+
 PORT="${MV_PORT:-8080}"
 LOG="${SERVER_LOG:-/workspace/server_v5.log}"
 SERVER_PY="${SERVER_PY:-/workspace/server_v5_api.py}"
