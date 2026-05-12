@@ -155,7 +155,7 @@ async def run_realtime_session(
         "OpenAI-Beta": "realtime=v1",
     }
 
-    log.info("[realtime] connecting to OpenAI...")
+    print("[realtime] connecting to OpenAI...", flush=True)
     try:
         async with ws_connect(REALTIME_URL, additional_headers=headers) as openai_ws:
             await _configure_session(openai_ws, session)
@@ -167,7 +167,8 @@ async def run_realtime_session(
                 return_exceptions=True,
             )
     except Exception as e:  # noqa: BLE001
-        log.warning("[realtime] session failed: %s", e)
+        print(f"[realtime] session failed: {e}", flush=True)
+        import traceback; traceback.print_exc()
         try:
             await client_ws.send_json({
                 "type": "error", "message": f"realtime failed: {e}",
@@ -192,6 +193,11 @@ async def _configure_session(openai_ws, session: VoiceSession) -> None:
 
     tools = _build_realtime_tools() if (session.mcp_connected and session._initialized) else []
 
+    # Realtime API session.update — only Whisper-1 is valid for the
+    # nested input_audio_transcription model (the newer
+    # gpt-4o-mini-transcribe is for the top-level /audio/transcriptions
+    # endpoint, not embedded inside Realtime). Using the wrong model
+    # makes OpenAI close the WS with an error.
     update_msg = {
         "type": "session.update",
         "session": {
@@ -201,23 +207,23 @@ async def _configure_session(openai_ws, session: VoiceSession) -> None:
             "input_audio_format": "pcm16",
             "output_audio_format": "pcm16",
             "input_audio_transcription": {
-                "model": "gpt-4o-mini-transcribe",
-                "language": "ar",
+                "model": "whisper-1",
             },
             "turn_detection": {
                 "type": "server_vad",
                 "threshold": 0.5,
                 "prefix_padding_ms": 300,
                 "silence_duration_ms": 700,
+                "create_response": True,
             },
             "tools": tools,
             "tool_choice": "auto",
-            "temperature": 0.7,
+            "temperature": 0.8,
         },
     }
     await openai_ws.send(json.dumps(update_msg))
-    log.info("[realtime] session configured (tools=%d, voice=%s)",
-             len(tools), REALTIME_VOICE)
+    print(f"[realtime] session.update sent (tools={len(tools)}, voice={REALTIME_VOICE})",
+          flush=True)
 
 
 async def _pump_user_to_openai(client_ws, openai_ws) -> None:
@@ -228,7 +234,7 @@ async def _pump_user_to_openai(client_ws, openai_ws) -> None:
         except Exception:
             return
         if msg.get("type") == "websocket.disconnect":
-            log.info("[realtime] client disconnected")
+            print("[realtime] client disconnected", flush=True)
             return
 
         if "bytes" in msg and msg["bytes"] is not None:
@@ -277,13 +283,28 @@ async def _pump_openai_to_user(
 ) -> None:
     """Forward OpenAI events + audio to the user, handle function calls."""
     pending_args: Dict[str, str] = {}  # call_id → accumulating JSON args
+    event_count = 0
 
-    async for raw in openai_ws:
-        try:
-            ev = json.loads(raw) if isinstance(raw, str) else json.loads(raw.decode())
-        except Exception:
-            continue
-        et = ev.get("type", "")
+    try:
+        async for raw in openai_ws:
+            event_count += 1
+            try:
+                ev = json.loads(raw) if isinstance(raw, str) else json.loads(raw.decode())
+            except Exception:
+                print(f"[realtime] non-JSON event from OpenAI: {raw[:200]}", flush=True)
+                continue
+            et = ev.get("type", "")
+            # First-time debug: log first few events + every error/important one
+            if event_count <= 3 or et in (
+                "error", "session.created", "session.updated",
+                "response.done", "response.audio_transcript.done",
+                "input_audio_buffer.speech_started",
+                "response.function_call_arguments.done",
+                "conversation.item.input_audio_transcription.completed",
+            ):
+                print(f"[realtime] openai event #{event_count}: {et}", flush=True)
+                if et == "error":
+                    print(f"[realtime] error detail: {ev.get('error')}", flush=True)
 
         if et == "response.audio.delta":
             # base64 pcm16 audio chunk — decode and binary-stream to user.
@@ -339,11 +360,15 @@ async def _pump_openai_to_user(
 
         elif et == "error":
             err = ev.get("error", {})
-            log.warning("[realtime] openai error: %s", err)
+            print(f"[realtime] openai error: {err}", flush=True)
             await client_ws.send_json({
                 "type": "error",
                 "message": err.get("message", "openai error"),
             })
+    except Exception as e:  # noqa: BLE001
+        print(f"[realtime] openai pump exited: {type(e).__name__}: {e}", flush=True)
+        import traceback; traceback.print_exc()
+    print(f"[realtime] openai pump finished after {event_count} events", flush=True)
 
 
 async def _handle_tool_call(
@@ -359,7 +384,7 @@ async def _handle_tool_call(
     Realtime doesn't have a native "pause for confirmation" primitive,
     so we model it as a conversational gate.)
     """
-    log.info("[realtime] tool call %s args=%s", name, list(args.keys()))
+    print(f"[realtime] tool call {name} args={list(args.keys())}", flush=True)
     await client_ws.send_json({
         "type": "tool_call_started", "tool": name,
     })

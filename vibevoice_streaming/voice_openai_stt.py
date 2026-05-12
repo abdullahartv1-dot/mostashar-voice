@@ -14,22 +14,22 @@ Switching strategy: set MV_STT_BACKEND=openai on the pod. The server's
 audio handler routes through this module instead of the local
 _whisper_transcribe_sync. When OPENAI key is missing, falls back to
 local Whisper automatically so the system never silently breaks.
+
+NOTE: uses print() instead of logging so output lands in
+/workspace/server_v5.log (the Python logging module isn't configured
+to emit anything by default in this process).
 """
 
 from __future__ import annotations
 
 import io
-import logging
 import os
-import struct
 import wave
 from typing import Optional
 
 import httpx
 import numpy as np
 
-
-log = logging.getLogger("voice_openai_stt")
 
 OPENAI_TRANSCRIBE_URL = os.environ.get(
     "MV_OPENAI_STT_URL",
@@ -43,11 +43,7 @@ OPENAI_STT_TIMEOUT_S = float(os.environ.get("MV_OPENAI_STT_TIMEOUT_S", "20"))
 
 
 def _pcm16_to_wav_bytes(audio_f32: np.ndarray, sample_rate: int) -> bytes:
-    """Convert float32 audio in [-1, 1] to WAV bytes (PCM16 mono).
-
-    Done in-memory to avoid touching the overflowed container disk.
-    """
-    # Clip and convert to int16
+    """Convert float32 audio in [-1, 1] to WAV bytes (PCM16 mono)."""
     clipped = np.clip(audio_f32, -1.0, 1.0)
     pcm16 = (clipped * 32767.0).astype(np.int16)
 
@@ -66,33 +62,22 @@ async def openai_transcribe(
     prompt: Optional[str] = None,
     language: Optional[str] = None,
 ) -> str:
-    """Transcribe a single 16 kHz mono audio clip via OpenAI's API.
+    """Transcribe a 16 kHz mono audio clip via OpenAI's API.
 
-    Args:
-        audio_f32_16k: float32 mono audio @ 16 kHz, values in [-1, 1].
-        prompt: optional Arabic prompt that biases vocabulary/style.
-        language: override the language (default from env: "ar").
-
-    Returns:
-        Transcribed Arabic text, or "" on any failure / silent input.
-
-    Raises:
-        RuntimeError if MV_OPENAI_KEY is missing — caller should catch
-        and fall back to local Whisper.
+    Returns transcribed Arabic text, or "" on any failure / silent input.
+    Raises RuntimeError if MV_OPENAI_KEY is missing.
     """
     api_key = os.environ.get("MV_OPENAI_KEY", "").strip()
     if not api_key:
         raise RuntimeError("MV_OPENAI_KEY env var not set")
 
+    dur_s = audio_f32_16k.size / 16000
     if audio_f32_16k.size < int(0.2 * 16000):
-        # Too short to bother sending — match local Whisper's gate.
-        log.info("[openai-stt] skipped (too short: %.2fs)",
-                 audio_f32_16k.size / 16000)
+        print(f"[openai-stt] skipped (too short: {dur_s*1000:.0f}ms)", flush=True)
         return ""
 
     wav_bytes = _pcm16_to_wav_bytes(audio_f32_16k, sample_rate=16000)
 
-    # multipart/form-data — model + language + file + optional prompt.
     files = {
         "file": ("audio.wav", wav_bytes, "audio/wav"),
     }
@@ -100,15 +85,14 @@ async def openai_transcribe(
         "model": OPENAI_STT_MODEL,
         "language": language or OPENAI_STT_LANGUAGE,
         "response_format": "json",
-        # Lower temperature → more faithful to actual audio, less
-        # creative interpretation. Helps with dialect Arabic.
         "temperature": "0",
     }
     if prompt:
-        data["prompt"] = prompt[:240]  # API caps prompt at ~250 tokens
+        data["prompt"] = prompt[:240]
 
     headers = {"Authorization": f"Bearer {api_key}"}
 
+    print(f"[openai-stt] sending {dur_s:.2f}s audio to {OPENAI_STT_MODEL}", flush=True)
     try:
         async with httpx.AsyncClient(timeout=OPENAI_STT_TIMEOUT_S) as client:
             resp = await client.post(
@@ -116,25 +100,26 @@ async def openai_transcribe(
                 files=files, data=data,
             )
     except httpx.TimeoutException:
-        log.warning("[openai-stt] timeout after %.0fs", OPENAI_STT_TIMEOUT_S)
+        print(f"[openai-stt] timeout after {OPENAI_STT_TIMEOUT_S:.0f}s", flush=True)
         return ""
     except Exception as e:  # noqa: BLE001
-        log.warning("[openai-stt] network error: %s", e)
+        print(f"[openai-stt] network error: {e}", flush=True)
         return ""
 
     if resp.status_code >= 400:
-        log.warning("[openai-stt] status %d: %s",
-                    resp.status_code, resp.text[:300])
+        print(f"[openai-stt] HTTP {resp.status_code}: {resp.text[:300]}", flush=True)
         return ""
 
     try:
         body = resp.json()
     except ValueError:
-        log.warning("[openai-stt] non-JSON response: %s", resp.text[:200])
+        print(f"[openai-stt] non-JSON response: {resp.text[:200]}", flush=True)
         return ""
 
     text = (body.get("text") or "").strip()
     if text:
-        log.info("[openai-stt] %d chars from %.2fs audio (%s)",
-                 len(text), audio_f32_16k.size / 16000, OPENAI_STT_MODEL)
+        print(f"[openai-stt] OK ({len(text)} chars from {dur_s:.2f}s): {text[:80]!r}",
+              flush=True)
+    else:
+        print(f"[openai-stt] empty result from {dur_s:.2f}s audio", flush=True)
     return text
