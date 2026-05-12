@@ -3408,8 +3408,15 @@ async def _conversation_turn_with_response(
         response_text = "عذراً، لم أفهم ما طلبته بشكل واضح. هل يمكنك إعادة سؤالك من فضلك؟"
 
     history.append({"role": "assistant", "content": response_text})
-    await ws.send_json({"type": "response_text", "text": response_text, "language": language})
-    await ws.send_json({"type": "audio_meta", "sample_rate": SAMPLE_RATE, "format": "pcm_s16le"})
+    # Wrap every WS send so a client that disconnected between the
+    # previous turn and this one (e.g. iOS Safari backgrounding the
+    # tab) doesn't bubble up as an unhandled exception → 1011.
+    try:
+        await ws.send_json({"type": "response_text", "text": response_text, "language": language})
+        await ws.send_json({"type": "audio_meta", "sample_rate": SAMPLE_RATE, "format": "pcm_s16le"})
+    except Exception as e:  # noqa: BLE001
+        print(f"[conversation] client gone before TTS started: {type(e).__name__}", flush=True)
+        return  # nothing more to do; the WS loop will detect disconnect
 
     first_emitted = False
     ttfa_ms = 0.0
