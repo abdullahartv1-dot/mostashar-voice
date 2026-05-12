@@ -108,6 +108,21 @@ except Exception as _e:  # noqa: BLE001
     openai_transcribe = None  # type: ignore[assignment]
     _OPENAI_STT_AVAILABLE = False
 
+# ElevenLabs TTS (optional). Set MV_TTS_BACKEND=elevenlabs to stream
+# audio from ElevenLabs's multilingual model instead of local
+# VibeVoice. Requires MV_ELEVENLABS_KEY. Cleaner Arabic prosody, no
+# Persian-drift issue, costs ~$0.30/1k characters.
+try:
+    try:
+        from voice_elevenlabs_tts import elevenlabs_stream  # type: ignore[no-redef]
+    except ImportError:
+        from .voice_elevenlabs_tts import elevenlabs_stream
+    _ELEVENLABS_TTS_AVAILABLE = True
+except Exception as _e:  # noqa: BLE001
+    print(f"[elevenlabs] module unavailable: {_e}")
+    elevenlabs_stream = None  # type: ignore[assignment]
+    _ELEVENLABS_TTS_AVAILABLE = False
+
 import numpy as np
 import soundfile as sf
 import librosa
@@ -161,6 +176,16 @@ STT_BACKEND = os.environ.get("MV_STT_BACKEND", "local").lower().strip()
 if STT_BACKEND not in ("local", "openai"):
     print(f"[stt] unknown MV_STT_BACKEND={STT_BACKEND!r}, defaulting to local")
     STT_BACKEND = "local"
+
+# TTS backend: "vibevoice" (local Arabic-voice-cloning model, default)
+# or "elevenlabs" (cloud multilingual model). ElevenLabs gives more
+# natural Arabic prosody and never drifts into Persian-sounding
+# gibberish, but costs ~$0.30/1k characters of output. The chat tab
+# uses this selection; the calls tab is independent (OpenAI Realtime).
+TTS_BACKEND = os.environ.get("MV_TTS_BACKEND", "vibevoice").lower().strip()
+if TTS_BACKEND not in ("vibevoice", "elevenlabs"):
+    print(f"[tts] unknown MV_TTS_BACKEND={TTS_BACKEND!r}, defaulting to vibevoice")
+    TTS_BACKEND = "vibevoice"
 # Default transcription language. "ar" forces Arabic decoding which
 # avoids Whisper's auto-detection occasionally guessing Persian/Urdu
 # on dialectal Arabic. Set "auto" to let it decide per call.
@@ -556,7 +581,12 @@ class HealthResponse(BaseModel):
     # "local"  — local Whisper-large-v3 on GPU
     # "openai" — gpt-4o-mini-transcribe via API (better Arabic dialects)
     stt_backend: str = "local"
+    # Which TTS engine produces response audio in the chat tab.
+    # "vibevoice"  — local Arabic voice-cloning model
+    # "elevenlabs" — cloud multilingual model (cleaner Arabic prosody)
+    tts_backend: str = "vibevoice"
     openai_key_configured: bool = False
+    elevenlabs_key_configured: bool = False
     # Sidecars are optional dependencies; their absence degrades but
     # doesn't break the main service (cloning falls back to raw upload,
     # conversations fall back to ASR + Qwen).
@@ -1965,7 +1995,9 @@ async def health():
         llm_model=LLM_MODEL_NAME if llm_model is not None else None,
         llm_backend=LLM_BACKEND,
         stt_backend=STT_BACKEND,
+        tts_backend=TTS_BACKEND,
         openai_key_configured=bool(os.environ.get("MV_OPENAI_KEY", "").strip()),
+        elevenlabs_key_configured=bool(os.environ.get("MV_ELEVENLABS_KEY", "").strip()),
         gemma4=gemma_h,
         openvoice=ov_h,
     )
@@ -3422,27 +3454,45 @@ async def _conversation_turn_with_response(
     ttfa_ms = 0.0
     chunks = 0
     client_gone = False
-    assert _tts_lock is not None
-    async with _serialize(_tts_lock, _tts_stats):
-        async for pcm in _generate_stream(response_text, voice_id, None):
-            if interrupt_flag["value"] or client_gone:
-                break
-            if not first_emitted:
-                ttfa_ms = (time.time() - turn_start) * 1000
-                first_emitted = True
-            # Wrap send_bytes so a client disconnect mid-stream doesn't
-            # bubble up as an unhandled exception (which FastAPI then
-            # surfaces to the still-open WS as code 1011). When the
-            # send fails, mark the client gone and let the loop unwind
-            # cleanly so the TTS lock is released.
-            try:
-                await ws.send_bytes(pcm)
-                chunks += 1
-            except Exception as e:  # noqa: BLE001
-                print(f"[conversation] client gone mid-TTS: {type(e).__name__}: {e}",
-                      flush=True)
-                client_gone = True
-                break
+
+    async def _tts_iterator():
+        """Pick the configured TTS backend and yield PCM chunks. The
+        ElevenLabs path is GPU-free (cloud API) and produces cleaner
+        Arabic; the VibeVoice path is local and supports the user's
+        cloned voices. Both stream raw 24 kHz PCM16 LE so the frontend
+        plays them identically."""
+        if (TTS_BACKEND == "elevenlabs"
+                and _ELEVENLABS_TTS_AVAILABLE
+                and elevenlabs_stream is not None):
+            async for chunk in elevenlabs_stream(response_text):
+                yield chunk
+            return
+        # VibeVoice — uses the GPU-serialized lock since the model is
+        # bound to a single GPU process.
+        assert _tts_lock is not None
+        async with _serialize(_tts_lock, _tts_stats):
+            async for pcm in _generate_stream(response_text, voice_id, None):
+                yield pcm
+
+    engine = TTS_BACKEND
+    async for pcm in _tts_iterator():
+        if interrupt_flag["value"] or client_gone:
+            break
+        if not first_emitted:
+            ttfa_ms = (time.time() - turn_start) * 1000
+            first_emitted = True
+        # Wrap send_bytes so a client disconnect mid-stream doesn't
+        # bubble up as an unhandled exception (which FastAPI then
+        # surfaces to the still-open WS as code 1011). When the send
+        # fails, mark the client gone and let the loop unwind cleanly.
+        try:
+            await ws.send_bytes(pcm)
+            chunks += 1
+        except Exception as e:  # noqa: BLE001
+            print(f"[conversation] client gone mid-TTS: {type(e).__name__}: {e}",
+                  flush=True)
+            client_gone = True
+            break
 
     total_ms = (time.time() - turn_start) * 1000
     if not client_gone:
@@ -3452,7 +3502,7 @@ async def _conversation_turn_with_response(
                 "ttfa_ms": round(ttfa_ms),
                 "total_ms": round(total_ms),
                 "chunks": chunks,
-                "engine": "gemma4",
+                "engine": engine,
             })
         except Exception:
             pass  # client may have just disconnected; nothing to do
