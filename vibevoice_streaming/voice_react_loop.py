@@ -185,11 +185,70 @@ async def _execute_tool(
 # Truncation helpers — keep MCP results small enough for the prompt
 # ──────────────────────────────────────────────────────────────────────────
 
+# Per-tool field whitelists — keep results small + LLM-friendly. The
+# raw Moshaar JSON includes 30+ fields per record (description in
+# Lexical JSON, attendees with full user objects, storage_space, etc.)
+# which blows out the prompt and gets truncated mid-string into invalid
+# JSON. We extract just the human-relevant fields for each tool.
+
+_SESSION_KEEP = {
+    "id", "name", "type", "form_type", "start_date", "end_date",
+    "all_day", "location", "privacy_setting", "completed_at",
+    "calendar_id",
+}
+_TASK_KEEP = {
+    "id", "name", "priority", "is_done", "is_archived",
+    "start_date", "estimated_due_date", "case_id", "client_id",
+}
+_CASE_KEEP = {
+    "id", "name", "priority", "status", "start_date", "end_date",
+    "client_id", "is_archived",
+}
+_CLIENT_KEEP = {"id", "name", "phone_number", "email", "type"}
+_MEMBER_KEEP = {"id", "name", "email", "role_id"}
+_CALENDAR_KEEP = {"id", "name", "type", "color"}
+_WORKFLOW_KEEP = {"id", "name", "type"}
+
+_LIST_FIELD_KEEP: Dict[str, set] = {
+    "list_calendar_sessions": _SESSION_KEEP,
+    "get_calendar_session": _SESSION_KEEP,
+    "list_tasks": _TASK_KEEP,
+    "get_task": _TASK_KEEP,
+    "list_cases": _CASE_KEEP,
+    "get_case": _CASE_KEEP,
+    "get_clients": _CLIENT_KEEP,
+    "get_workspace_members": _MEMBER_KEEP,
+    "list_calendars": _CALENDAR_KEEP,
+    "get_workflows": _WORKFLOW_KEEP,
+}
+
+
+def _slim_record(rec: Any, keep: set) -> Any:
+    """Filter a record dict to just the whitelist fields, recursively."""
+    if isinstance(rec, dict):
+        out = {}
+        for k, v in rec.items():
+            if k in keep:
+                out[k] = v
+        return out
+    return rec
+
+
+def _slim_list(items: List[Any], keep: set, max_items: int = 10) -> List[Any]:
+    return [_slim_record(it, keep) for it in items[:max_items]]
+
+
 def _summarize_result(name: str, envelope: Dict[str, Any]) -> str:
     """Produce a compact, LLM-friendly summary of an MCP result.
 
-    Avoids feeding raw 50KB JSON back to Gemma. We keep just enough
-    structure for the LLM to compose its natural-language reply.
+    Strategy:
+      1. Failures → error JSON (small).
+      2. List-style results → whitelist relevant fields, cap to 10 items.
+      3. Single-record results → whitelist relevant fields.
+      4. Unknown shape → cap at 1200 chars (legacy fallback).
+
+    The whitelist prevents 8 KB Lexical-JSON descriptions and full user
+    objects from inflating the prompt and breaking on mid-string truncation.
     """
     if not envelope.get("ok"):
         kind = envelope.get("kind", "error")
@@ -202,23 +261,59 @@ def _summarize_result(name: str, envelope: Dict[str, Any]) -> str:
     if data is None:
         return json.dumps({"ok": True}, ensure_ascii=False)
 
-    # Already-flat dict — pass through (capped)
-    raw = json.dumps(data, ensure_ascii=False)
+    # Many Moshaar tools return {"success": true, "data": {...}} —
+    # unwrap one level so we work with the actual payload.
+    inner = data
+    if isinstance(data, dict) and "success" in data and "data" in data:
+        if data.get("success") is False:
+            return json.dumps(
+                {"error": data.get("error", "tool error"), "kind": "tool"},
+                ensure_ascii=False,
+            )
+        inner = data["data"]
+
+    keep = _LIST_FIELD_KEEP.get(name)
+
+    # Locate the list inside `inner` if present
+    list_key = None
+    list_val = None
+    if isinstance(inner, dict):
+        for k in ("calendar_sessions", "tasks", "cases", "clients", "members",
+                  "workspace_members", "calendars", "workflows", "data",
+                  "items", "results", "rows"):
+            if k in inner and isinstance(inner[k], list):
+                list_key = k
+                list_val = inner[k]
+                break
+    elif isinstance(inner, list):
+        list_val = inner
+        list_key = "items"
+
+    if list_val is not None:
+        # Shrink the list progressively until the summary fits inside
+        # the 1800-char budget. Never truncate mid-JSON — always return
+        # a complete object so the LLM can parse it.
+        out_key = list_key or "items"
+        for cap in (10, 5, 3, 1, 0):
+            slim_items = _slim_list(list_val, keep, max_items=cap) if keep else list_val[:cap]
+            result = {
+                "count": len(list_val),
+                "showing": len(slim_items),
+                out_key: slim_items,
+            }
+            out = json.dumps(result, ensure_ascii=False)
+            if len(out) <= 1800:
+                return out
+        # All items dropped, just return the count
+        return json.dumps({"count": len(list_val), "showing": 0, out_key: []}, ensure_ascii=False)
+
+    # Single-record path
+    if isinstance(inner, dict) and keep:
+        return json.dumps(_slim_record(inner, keep), ensure_ascii=False)
+
+    raw = json.dumps(inner, ensure_ascii=False)
     if len(raw) <= 1200:
         return raw
-
-    # Try common patterns: data.data, data.items, data.results
-    if isinstance(data, dict):
-        for k in ("data", "items", "results", "rows"):
-            if k in data and isinstance(data[k], list):
-                # Truncate list to first 8 items
-                truncated = {
-                    **{kk: vv for kk, vv in data.items() if kk != k},
-                    k: data[k][:8],
-                    "_truncated_from": len(data[k]),
-                }
-                return json.dumps(truncated, ensure_ascii=False)[:1200]
-
     return raw[:1200] + "..."
 
 
