@@ -56,7 +56,13 @@ OPENAI_ENDPOINT = os.environ.get(
 OPENAI_MODEL = os.environ.get("MV_OPENAI_MODEL", "gpt-4o-mini")
 OPENAI_TIMEOUT_S = float(os.environ.get("MV_OPENAI_TIMEOUT_S", "30"))
 
-MAX_ITERATIONS = 5
+# 12 iterations gives the model room to walk through multi-step
+# workflows like "list_calendars → list_calendar_sessions for each
+# calendar → summarize". 5 was too low when OpenAI broke a batch
+# tool-call into smaller groups across iterations and ended up hitting
+# the limit halfway through. Each iteration is ~1 OpenAI request
+# + tool round-trips, so 12 is still cheap.
+MAX_ITERATIONS = 12
 
 
 # ──────────────────────────────────────────────────────────────────────────
