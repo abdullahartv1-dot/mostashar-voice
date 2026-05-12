@@ -383,81 +383,112 @@ async def run_voice_turn_openai(
             break
 
         # ── Tool calls present ──
-        # OpenAI may suggest multiple parallel tool calls. We currently run
-        # them sequentially because some are mutations that need user
-        # confirmation. If ANY require confirmation we surface the first
-        # one and bail.
-        first_call = tool_calls[0]
-        call_id = first_call.get("id", "")
-        fn = first_call.get("function", {})
-        tool_name = fn.get("name", "")
-        try:
-            raw_args = json.loads(fn.get("arguments", "{}") or "{}")
-        except (ValueError, TypeError):
-            raw_args = {}
+        # OpenAI's chat-completions function calling REQUIRES that every
+        # tool_call in the assistant message gets a matching tool message
+        # before the next assistant turn. If we respond to only one of N
+        # parallel calls, the next request fails with 400: "tool_call_ids
+        # did not have response messages". So we execute every call and
+        # push a tool result for each — confirmation-required mutations
+        # get a synthetic "needs_confirmation" result instead so OpenAI
+        # can ask the user, the assistant message still gets all of its
+        # responses, and the conversation can continue.
 
-        if not tool_name or tool_name not in TOOLS_BY_NAME:
-            # Hallucinated tool name — push an error result so the model can recover
-            session.history.append({
-                "role": "assistant",
-                "content": content,
-                "tool_calls": tool_calls,
-            })
-            session.history.append({
-                "role": "tool",
-                "tool_call_id": call_id,
-                "name": tool_name or "unknown",
-                "content": json.dumps(
-                    {"error": "tool not in voice catalog",
-                     "available": list(TOOLS_BY_NAME.keys())[:8]},
-                    ensure_ascii=False,
-                ),
-            })
-            user_text = ""
-            continue
-
-        # Confirmation gate for mutations
-        if needs_confirmation(tool_name):
-            confirm_msg = content or (
-                f"تريد أن أُنفّذ: {TOOLS_BY_NAME[tool_name].purpose_ar}؟ "
-                "قل 'نعم' للتأكيد."
-            )
-            session.pending_tool = {"name": tool_name, "arguments": raw_args}
-            session.push_assistant(confirm_msg)
-            tool_events.append({"type": "confirmation_pending", "tool": tool_name})
-            return ReactResult(
-                text=confirm_msg,
-                pending_confirmation=True,
-                tool_events=tool_events,
-            )
-
-        # Execute read-only tool — uses voice_react_loop._execute_tool so
-        # the BigInt + perPage workarounds apply identically.
-        log.info("openai exec %s args=%s",
-                 tool_name, list((raw_args or {}).keys()))
-        envelope = await _execute_tool(
-            {"name": tool_name, "arguments": raw_args}, session,
-        )
-        summary = _summarize_result(tool_name, envelope)
-
-        # Push assistant turn with tool_calls + the tool result, linked
-        # by tool_call_id so OpenAI can match them up.
+        # Push the assistant turn ONCE (with all tool_calls) before any
+        # tool result, so OpenAI sees the right order on the next call.
         session.history.append({
             "role": "assistant",
             "content": content,
             "tool_calls": tool_calls,
         })
-        session.history.append({
-            "role": "tool",
-            "tool_call_id": call_id,
-            "name": tool_name,
-            "content": summary,
-        })
-        tool_events.append({
-            "type": "tool_result",
-            "tool": tool_name,
-            "ok": envelope.get("ok", False),
-        })
+
+        first_confirm_msg: Optional[str] = None  # surface first mutation
+        first_confirm_pending: Optional[Dict[str, Any]] = None
+
+        for tc in tool_calls:
+            call_id = tc.get("id", "")
+            fn = tc.get("function", {})
+            tool_name = fn.get("name", "")
+            try:
+                raw_args = json.loads(fn.get("arguments", "{}") or "{}")
+            except (ValueError, TypeError):
+                raw_args = {}
+
+            if not tool_name or tool_name not in TOOLS_BY_NAME:
+                session.history.append({
+                    "role": "tool",
+                    "tool_call_id": call_id,
+                    "name": tool_name or "unknown",
+                    "content": json.dumps(
+                        {"error": "tool not in voice catalog",
+                         "available": list(TOOLS_BY_NAME.keys())[:8]},
+                        ensure_ascii=False,
+                    ),
+                })
+                continue
+
+            if needs_confirmation(tool_name):
+                # Don't execute — but DO push a tool result that explains
+                # what the model should do (ask the user). Otherwise the
+                # next OpenAI request fails on the orphan tool_call_id.
+                session.history.append({
+                    "role": "tool",
+                    "tool_call_id": call_id,
+                    "name": tool_name,
+                    "content": json.dumps(
+                        {"ok": False, "kind": "needs_confirmation",
+                         "error": "هذي عملية مهمة — اطلب تأكيداً شفهياً "
+                                  "من المستخدم قبل إعادة استدعاء الأداة."},
+                        ensure_ascii=False,
+                    ),
+                })
+                # Remember the first confirmation so we surface a single
+                # bail-and-ask response at the end of this turn.
+                if first_confirm_pending is None:
+                    first_confirm_pending = {"name": tool_name, "arguments": raw_args}
+                    first_confirm_msg = content or (
+                        f"تريد أن أُنفّذ: {TOOLS_BY_NAME[tool_name].purpose_ar}؟ "
+                        "قل 'نعم' للتأكيد."
+                    )
+                continue
+
+            # Read-only tool — execute and push the real result.
+            log.info("openai exec %s args=%s",
+                     tool_name, list((raw_args or {}).keys()))
+            envelope = await _execute_tool(
+                {"name": tool_name, "arguments": raw_args}, session,
+            )
+            summary = _summarize_result(tool_name, envelope)
+            session.history.append({
+                "role": "tool",
+                "tool_call_id": call_id,
+                "name": tool_name,
+                "content": summary,
+            })
+            tool_events.append({
+                "type": "tool_result",
+                "tool": tool_name,
+                "ok": envelope.get("ok", False),
+            })
+
+        # After running every tool_call in the assistant message:
+        # if any one of them required confirmation, surface a single
+        # bail-out message asking the user. The pending tool is set so
+        # the next user reply ("نعم" / "لا") gets classified by
+        # classify_confirmation and executed (or cancelled) from the
+        # top of the next run_voice_turn_openai call.
+        if first_confirm_msg and first_confirm_pending:
+            session.pending_tool = first_confirm_pending
+            session.push_assistant(first_confirm_msg)
+            tool_events.append({
+                "type": "confirmation_pending",
+                "tool": first_confirm_pending["name"],
+            })
+            return ReactResult(
+                text=first_confirm_msg,
+                pending_confirmation=True,
+                tool_events=tool_events,
+            )
+
         user_text = ""  # loop with the tool result in context
 
     else:
